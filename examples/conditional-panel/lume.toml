@@ -1,0 +1,4 @@
+[project]
+name = "conditional-panel"
+entry = "src/app.lume"
+out_dir = "dist"

@@ -1,0 +1,16 @@
+[package]
+name = "lume_codegen_html"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_ast = { path = "../lume_ast" }
+lume_codegen_css = { path = "../lume_codegen_css" }
+lume_ir = { path = "../lume_ir" }
+
+[dev-dependencies]
+lume_hir = { path = "../lume_hir" }
+lume_parser = { path = "../lume_parser" }
+
+[lib]
+path = "src/lib.rs"

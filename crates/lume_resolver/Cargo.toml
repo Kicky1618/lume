@@ -1,0 +1,15 @@
+[package]
+name = "lume_resolver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_ast = { path = "../lume_ast" }
+lume_diagnostics = { path = "../lume_diagnostics" }
+lume_hir = { path = "../lume_hir" }
+
+[dev-dependencies]
+lume_parser = { path = "../lume_parser" }
+
+[lib]
+path = "src/lib.rs"

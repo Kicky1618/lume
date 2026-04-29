@@ -1,0 +1,4 @@
+[project]
+name = "list-picker"
+entry = "src/app.lume"
+out_dir = "dist"

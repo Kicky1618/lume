@@ -1,0 +1,4 @@
+[project]
+name = "lume-app"
+entry = "src/app.lume"
+out_dir = "dist"

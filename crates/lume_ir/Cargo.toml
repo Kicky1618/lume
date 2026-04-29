@@ -1,0 +1,12 @@
+[package]
+name = "lume_ir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_ast = { path = "../lume_ast" }
+lume_diagnostics = { path = "../lume_diagnostics" }
+lume_hir = { path = "../lume_hir" }
+
+[lib]
+path = "src/lib.rs"

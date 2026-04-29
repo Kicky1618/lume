@@ -1,0 +1,30 @@
+component App {
+  state home: i32 = 0
+  state away: i32 = 0
+
+  view {
+    Column gap=16 padding=16 {
+      Text("Home {home} - Away {away}")
+
+      Row gap=8 {
+        Button("Home +1") {
+          on click {
+            home += 1
+          }
+        }
+
+        Button("Away +1") {
+          on click {
+            away += 1
+          }
+        }
+      }
+
+      if home > away {
+        Text("Home is ahead.")
+      } else {
+        Text("Away is tied or ahead.")
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+component App {
+  state count: i64 = 0
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Count: {count}")
+
+      Button("増やす") {
+        on click {
+          count += 140
+        }
+      }
+    }
+  }
+}

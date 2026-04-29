@@ -1,0 +1,10 @@
+[package]
+name = "lume_ast"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_span = { path = "../lume_span" }
+
+[lib]
+path = "src/lib.rs"

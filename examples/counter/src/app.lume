@@ -1,0 +1,23 @@
+component App {
+  state count: i32 = 0
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Count: {count}")
+
+      Row gap=8 {
+        Button("Increment") {
+          on click {
+            count += 1
+          }
+        }
+
+        Button("Decrement") {
+          on click {
+            count -= 1
+          }
+        }
+      }
+    }
+  }
+}

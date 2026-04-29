@@ -1,0 +1,20 @@
+component App {
+  state selected: String = "none"
+  state items: Array = ["Quartz", "Cedar", "Nimbus", "Sol"]
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Selected: {selected}")
+
+      Row gap=8 {
+        for item, index in items {
+          Button("Pick {item}") {
+            on click {
+              selected = item
+            }
+          }
+        }
+      }
+    }
+  }
+}

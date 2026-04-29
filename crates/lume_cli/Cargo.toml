@@ -1,0 +1,13 @@
+[package]
+name = "lume"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_diagnostics = { path = "../lume_diagnostics" }
+lume_driver = { path = "../lume_driver" }
+lume_session = { path = "../lume_session" }
+
+[[bin]]
+name = "lume"
+path = "src/main.rs"

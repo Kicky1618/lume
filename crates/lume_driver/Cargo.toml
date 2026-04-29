@@ -1,0 +1,20 @@
+[package]
+name = "lume_driver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lume_codegen_css = { path = "../lume_codegen_css" }
+lume_codegen_html = { path = "../lume_codegen_html" }
+lume_codegen_js = { path = "../lume_codegen_js" }
+lume_diagnostics = { path = "../lume_diagnostics" }
+lume_formatter = { path = "../lume_formatter" }
+lume_hir = { path = "../lume_hir" }
+lume_ir = { path = "../lume_ir" }
+lume_parser = { path = "../lume_parser" }
+lume_resolver = { path = "../lume_resolver" }
+lume_session = { path = "../lume_session" }
+lume_typeck = { path = "../lume_typeck" }
+
+[lib]
+path = "src/lib.rs"

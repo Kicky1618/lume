@@ -1,0 +1,41 @@
+theme default {
+  color surface = "#ffffff"
+  color ink = "#111827"
+  color accent = "#2563eb"
+  space md = 16
+  space lg = 24
+  radius md = 12
+}
+
+style card {
+  padding: lg
+  background: surface
+  color: ink
+  radius: md
+}
+
+style accentText {
+  color: accent
+}
+
+component App {
+  state title: String = "Theme tokens"
+
+  view {
+    Column gap=16 padding=16 {
+      Box style=card {
+        Column gap=12 {
+          Text("{title}")
+          Text("This card uses a theme-backed style declaration.")
+          Button("Rename") {
+            on click {
+              title = "Styled by Lume"
+            }
+          }
+        }
+      }
+
+      Text("Accent token is emitted into CSS variables.")
+    }
+  }
+}

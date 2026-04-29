@@ -1,0 +1,18 @@
+component App {
+  state captions: Array = ["Forest", "Ocean", "City"]
+
+  view {
+    Column gap=16 padding=16 {
+      Text("Gallery")
+
+      Grid columns=3 gap=12 {
+        for caption in captions {
+          Box padding=12 {
+            Image(src="https://picsum.photos/seed/lume/320/180", alt="Sample image")
+            Text("{caption}")
+          }
+        }
+      }
+    }
+  }
+}

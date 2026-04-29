@@ -1,0 +1,22 @@
+component App {
+  state name: String = "Lume"
+  state greeting: String = "Hello"
+
+  view {
+    Column gap=12 padding=16 {
+      Input(value=name, label="Name", placeholder="Your name") {
+        on input(value) {
+          name = value
+        }
+      }
+
+      Input(value=greeting, label="Greeting", placeholder="Greeting") {
+        on input(value) {
+          greeting = value
+        }
+      }
+
+      Text("{greeting}, {name}")
+    }
+  }
+}

@@ -1,0 +1,33 @@
+[workspace]
+members = [
+  "crates/lume_cli",
+  "crates/lume_driver",
+  "crates/lume_session",
+  "crates/lume_span",
+  "crates/lume_diagnostics",
+  "crates/lume_lexer",
+  "crates/lume_parser",
+  "crates/lume_ast",
+  "crates/lume_hir",
+  "crates/lume_resolver",
+  "crates/lume_typeck",
+  "crates/lume_ir",
+  "crates/lume_codegen_html",
+  "crates/lume_codegen_css",
+  "crates/lume_codegen_js",
+  "crates/lume_formatter",
+  "crates/lume_codegen_llvm",
+  "crates/lume_codegen_wasm",
+  "crates/lume_backend_native",
+  "crates/lume_backend_jit",
+  "crates/lume_runtime_dom",
+  "crates/lume_runtime_server",
+  "crates/lume_ffi",
+  "crates/lume_lsp",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"

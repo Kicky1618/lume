@@ -1,0 +1,36 @@
+component App {
+  state open: Bool = true
+  state clicks: i32 = 0
+
+  view {
+    Column gap=12 padding=16 {
+      Row gap=8 {
+        Button("Open") {
+          on click {
+            open = true
+          }
+        }
+
+        Button("Close") {
+          on click {
+            open = false
+          }
+        }
+
+        Button("Count") {
+          on click {
+            clicks += 1
+          }
+        }
+      }
+
+      if open {
+        Box padding=16 {
+          Text("The panel is open. Clicks: {clicks}")
+        }
+      } else {
+        Text("The panel is closed.")
+      }
+    }
+  }
+}
