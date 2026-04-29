@@ -127,5 +127,5 @@ fn port_from(args: &[String]) -> Result<u16, Box<dyn std::error::Error>> {
 }
 
 fn print_help() {
-    println!("lume 0.1.0\n\nUSAGE:\n  lume build [--entry src/app.lume] [--out-dir dist]\n  lume dev [--entry src/app.lume] [--out-dir dist] [--port 3000]\n  lume check [--entry src/app.lume]\n  lume fmt [--check] [path]\n  lume init");
+    println!("lume 0.2.0\n\nUSAGE:\n  lume build [--entry src/app.lume] [--out-dir dist]\n  lume dev [--entry src/app.lume] [--out-dir dist] [--port 3000]\n  lume check [--entry src/app.lume]\n  lume fmt [--check] [path]\n  lume init");
 }

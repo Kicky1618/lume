@@ -16,3 +16,4 @@ Examples:
 - `gallery-grid`: `Grid`, `for`, and `Image`.
 - `scoreboard`: multiple counters and conditional text.
 - `form-state`: small form-like state preview.
+- `composed-card`: local `.lume` import with exported component and style.

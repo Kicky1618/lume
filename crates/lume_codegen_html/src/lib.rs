@@ -33,10 +33,11 @@ pub fn generate(program: &LumeProgram) -> HtmlOutput {
         bindings: Vec::new(),
         events: Vec::new(),
         loop_params: Vec::new(),
+        component_stack: Vec::new(),
     };
     let body = program
         .view()
-        .map(|view| render_view(view, &mut ctx))
+        .map(|view| render_view(view, &mut ctx, program))
         .unwrap_or_default();
     let html = format!(
         "<!doctype html>\n<html lang=\"ja\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Lume App</title>\n    <link rel=\"stylesheet\" href=\"/assets/style.css\">\n    <script type=\"module\" src=\"/assets/app.js\"></script>\n  </head>\n  <body>\n    <div id=\"lume-root\" data-lume-component=\"{}\" data-lume-id=\"c0\">\n{}    </div>\n  </body>\n</html>\n",
@@ -56,26 +57,27 @@ struct Ctx {
     bindings: Vec<Binding>,
     events: Vec<EventBinding>,
     loop_params: Vec<String>,
+    component_stack: Vec<String>,
 }
 
-fn render_view(view: &ViewBlock, ctx: &mut Ctx) -> String {
+fn render_view(view: &ViewBlock, ctx: &mut Ctx, program: &LumeProgram) -> String {
     view.nodes
         .iter()
-        .map(|node| render_node(node, ctx))
+        .map(|node| render_node(node, ctx, program))
         .collect::<Vec<_>>()
         .join("")
 }
 
-fn render_node(node: &ViewNode, ctx: &mut Ctx) -> String {
+fn render_node(node: &ViewNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     match node {
-        ViewNode::Element(element) => render_element(element, ctx),
+        ViewNode::Element(element) => render_element(element, ctx, program),
         ViewNode::Text(text) => render_text_expr(&text.value, ctx),
         ViewNode::If(node) => {
-            let then_html = render_view(&node.then_block, ctx);
+            let then_html = render_view(&node.then_block, ctx, program);
             let else_html = node
                 .else_block
                 .as_ref()
-                .map(|block| render_view(block, ctx))
+                .map(|block| render_view(block, ctx, program))
                 .unwrap_or_default();
             format!(
                 "<!-- lume-if:{} -->{}{}\n",
@@ -90,7 +92,7 @@ fn render_node(node: &ViewNode, ctx: &mut Ctx) -> String {
             if let Some(index) = &pushed_index {
                 ctx.loop_params.push(index.clone());
             }
-            let html = render_view(&node.body, ctx);
+            let html = render_view(&node.body, ctx, program);
             if pushed_index.is_some() {
                 ctx.loop_params.pop();
             }
@@ -109,7 +111,10 @@ fn render_node(node: &ViewNode, ctx: &mut Ctx) -> String {
     }
 }
 
-fn render_element(element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    if let Some(component) = program.component_named(&element.name) {
+        return render_component(component, element, ctx, program);
+    }
     match element.name.as_str() {
         "Text" => {
             let expr = first_arg(element).cloned().unwrap_or(Expr {
@@ -121,9 +126,27 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx) -> String {
         "Button" => render_button(element, ctx),
         "Input" => render_input(element, ctx),
         "Image" => render_image(element, ctx),
-        "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx),
-        _ => render_container(element, ctx),
+        "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
+        _ => render_container(element, ctx, program),
     }
+}
+
+fn render_component(
+    component: &ComponentDecl,
+    element: &ElementNode,
+    ctx: &mut Ctx,
+    program: &LumeProgram,
+) -> String {
+    if ctx.component_stack.contains(&component.name) {
+        return String::new();
+    }
+    let Some(view) = program.expand_component_view(component, element) else {
+        return String::new();
+    };
+    ctx.component_stack.push(component.name.clone());
+    let html = render_view(&view, ctx, program);
+    ctx.component_stack.pop();
+    html
 }
 
 fn render_text_expr(expr: &Expr, ctx: &mut Ctx) -> String {
@@ -190,7 +213,7 @@ fn render_image(element: &ElementNode, ctx: &mut Ctx) -> String {
     )
 }
 
-fn render_container(element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_container(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let mut classes = Vec::new();
     if let Some(class) = layout_class(&element.name) {
@@ -215,7 +238,7 @@ fn render_container(element: &ElementNode, ctx: &mut Ctx) -> String {
     let children = element
         .children
         .as_ref()
-        .map(|view| render_view(view, ctx))
+        .map(|view| render_view(view, ctx, program))
         .unwrap_or_default();
     format!(
         "<div{} data-lume-id=\"{}\">\n{}</div>\n",

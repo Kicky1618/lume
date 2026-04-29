@@ -1,4 +1,4 @@
-# Lume v0.1 実装計画
+# Lume v0.1 / v0.2 実装計画
 
 この計画は、仕様書の v0.1 MVP を最短で成立させることを目的に整理したものです。
 最初の実行可能成果物は HTML + CSS + JS であり、WASM / LLVM / Native / JIT は v0.1 では skeleton までに留めます。
@@ -14,7 +14,7 @@
 
 ### 現在の実装状況
 
-2026-04-29 時点で、v0.1 MVP は完了。
+2026-04-29 時点で、v0.1 MVP は完了。v0.2 も小規模な複数ファイル UI プロジェクトを扱える範囲まで完了。
 
 - Rust workspace と主要 crate を作成済み
 - `lume init`, `lume build`, `lume check`, `lume fmt`, `lume dev` を実装済み
@@ -30,21 +30,29 @@
 - `lume.manifest.json` に routes / styles / themes を出力するように実装済み
 - `app.js` が `lume.manifest.json` から初期 state を復元できるように実装済み
 - local `.lume` import の存在確認を `lume_resolver` に追加済み
+- local `.lume` import の export 検証を追加済み
+- component scope の名前表を作成し、type check の未知 component 診断へ接続済み
+- local import した component / style / theme を IR へ取り込み、custom component を HTML / JS codegen でインライン展開できるように実装済み
+- custom component の props と default / named slot を IR 展開で扱えるように実装済み
+- 複数 component を含む entry では `App` component を優先して root にするように実装済み
+- diagnostics の caret 幅と error / warning count summary を改善済み
 - `lume fmt --check` を追加済み
 - `lume dev` で watch build と静的 Web サーバーを同時に起動できるように実装済み
 - duplicate state 診断 `LUME3005` を追加済み
 - `examples/` に counter、input、conditional、loop event、theme/style、gallery、scoreboard、form state のサンプルプロジェクトを追加済み
 - `lume_resolver` を追加し、標準モジュール import の最小検証を実装済み
 - `Image` の `alt` 欠落、`Input` の label / aria-label 欠落、空 `Button`、未宣言 state 代入の診断を実装済み
+- state 型検査で `i32` / `i64` / `u32` / `u64` / `f64` などの基本数値型を許容済み
 - LLVM / WASM / Native / JIT / runtime / FFI / LSP の skeleton crate を作成済み
 - parser、typeck、JS codegen の最小回帰テストを追加済み
 
 v0.1 後の主な課題:
 
-- `if` / `for` の動的再描画は root 再描画方式。差分更新は v0.2 以降
+- `if` / `for` の動的再描画は root 再描画方式。差分更新は v0.3 以降
 - HIR は AST wrapper に近い。component scope の本格名前解決は v0.2 以降
-- theme mode、nested route、Outlet、dynamic segment、catch-all は v0.2 以降
-- formatter はインデント中心。AST ベース formatter は v0.2 以降
+- custom component の child state isolation は v0.3 以降
+- theme mode、nested route、Outlet、dynamic segment、catch-all は v0.3 以降
+- formatter はインデント中心。AST ベース formatter は v0.3 以降
 
 ### フェーズ 1: ワークスペースと基盤
 
@@ -105,6 +113,8 @@ v0.1 後の主な課題:
 - HIR が後段の codegen に渡せる
 
 状態: v0.1 完了。未宣言 state 代入、duplicate state、基本 a11y、未知型 warning、標準モジュール import の最小検証、local import 存在確認は実装済み。
+
+v0.2 完了。component / page / layout の名前表を作成し、同一ファイル component と export された local import を type check で既知 component として扱えるようにした。local import が未 export item を要求した場合は `LUME6004`、検査不能な local module は `LUME6107`、raw JavaScript import は `LUME6009` として診断する。IR は local import した exported component / style / theme を取り込み、codegen は custom component の view をインライン展開できる。custom component の props と default / named slot も IR 展開で扱える。
 
 ### フェーズ 4: Lume IR と UI コア
 
@@ -222,12 +232,17 @@ v0.1 は完了。次は品質と表現力を上げる。
    - 完了: `import { Text } from "lume/std/ui"` の exported item を検証する
    - 完了: 未知の標準モジュール / 未 export item を `LUME6101` / `LUME6102` として診断する
    - 完了: local `.lume` import の存在確認を行う
-   - 次: component scope の名前表を作る
+   - 完了: local `.lume` import の export item を検証する
+   - 完了: component scope の名前表を作る
+   - 完了: type check の未知 component 診断を名前表に接続する
+   - 完了: local import した component / style / theme を IR へ取り込む
+   - 完了: custom component の view を HTML / JS codegen でインライン展開する
+   - 完了: custom component の props と default / named slot を扱う
 
 2. 動的 view runtime
    - 完了: `if` / `for` を state 更新後にも反映できる rendering path を追加する
    - 完了: まずは root 再描画方式で正しさを優先する
-   - 次: 既存の text binding 更新と統合し、差分更新へ近づける
+   - v0.3: 既存の text binding 更新と統合し、差分更新へ近づける
    - 完了: `for` 内イベントで loop item / index を action に渡せるようにする
    - 完了: `Input` を含む root 再描画時の focus / selection 維持を入れる
 
@@ -246,8 +261,8 @@ v0.1 は完了。次は品質と表現力を上げる。
    - 完了: manifest から初期 state を復元する runtime hook を追加する
 
 5. formatter と診断の品質改善
-   - formatter を parser AST ベースに近づける
-   - span 表示の caret 幅、複数診断、warning/error count を整える
+   - v0.3: formatter を parser AST ベースに近づける
+   - 完了: span 表示の caret 幅、複数診断、warning/error count を整える
 
 ## 3. v0.1 ではやらないこと
 

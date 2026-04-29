@@ -317,7 +317,11 @@ impl Parser {
                 let body = self.view_block()?;
                 return Some(ViewNode::SlotFill { name, span, body });
             }
-            let name = self.ident_or_keyword();
+            let name = if self.is_identish() {
+                self.ident_or_keyword()
+            } else {
+                None
+            };
             return Some(ViewNode::SlotUse { name, span });
         }
         if self.eat_keyword("on") {

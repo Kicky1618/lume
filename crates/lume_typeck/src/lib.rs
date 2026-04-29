@@ -4,16 +4,27 @@ use lume_hir::HirProgram;
 use std::collections::HashSet;
 
 pub fn check(program: &HirProgram) -> Diagnostics {
+    check_with_known_components(program, &standard_component_symbols())
+}
+
+pub fn check_with_known_components(
+    program: &HirProgram,
+    known_components: &HashSet<String>,
+) -> Diagnostics {
     let mut diagnostics = Diagnostics::default();
     for decl in &program.ast.declarations {
         if let Decl::Component(component) | Decl::Page(component) | Decl::Layout(component) = decl {
-            check_component(component, &mut diagnostics);
+            check_component(component, known_components, &mut diagnostics);
         }
     }
     diagnostics
 }
 
-fn check_component(component: &ComponentDecl, diagnostics: &mut Diagnostics) {
+fn check_component(
+    component: &ComponentDecl,
+    known_components: &HashSet<String>,
+    diagnostics: &mut Diagnostics,
+) {
     let mut states = HashSet::new();
     let mut has_view = false;
     for item in &component.items {
@@ -28,7 +39,16 @@ fn check_component(component: &ComponentDecl, diagnostics: &mut Diagnostics) {
                 }
                 if !matches!(
                     state.ty.as_str(),
-                    "i32" | "Int" | "String" | "Bool" | "bool" | "f64" | "Number"
+                    "i32"
+                        | "i64"
+                        | "u32"
+                        | "u64"
+                        | "Int"
+                        | "String"
+                        | "Bool"
+                        | "bool"
+                        | "f64"
+                        | "Number"
                 ) {
                     diagnostics.push(Diagnostic::warning(
                         "LUME3001",
@@ -39,7 +59,7 @@ fn check_component(component: &ComponentDecl, diagnostics: &mut Diagnostics) {
             }
             ComponentItem::View(view) => {
                 has_view = true;
-                check_view(view, &states, diagnostics);
+                check_view(view, &states, known_components, diagnostics);
             }
             ComponentItem::Action(action) => {
                 check_statements(&action.body.statements, &states, diagnostics);
@@ -56,29 +76,37 @@ fn check_component(component: &ComponentDecl, diagnostics: &mut Diagnostics) {
     }
 }
 
-fn check_view(view: &ViewBlock, states: &HashSet<String>, diagnostics: &mut Diagnostics) {
+fn check_view(
+    view: &ViewBlock,
+    states: &HashSet<String>,
+    known_components: &HashSet<String>,
+    diagnostics: &mut Diagnostics,
+) {
     for node in &view.nodes {
         match node {
-            ViewNode::Element(element) => check_element(element, states, diagnostics),
+            ViewNode::Element(element) => {
+                check_element(element, states, known_components, diagnostics)
+            }
             ViewNode::If(node) => {
-                check_view(&node.then_block, states, diagnostics);
+                check_view(&node.then_block, states, known_components, diagnostics);
                 if let Some(block) = &node.else_block {
-                    check_view(block, states, diagnostics);
+                    check_view(block, states, known_components, diagnostics);
                 }
             }
-            ViewNode::For(node) => check_view(&node.body, states, diagnostics),
+            ViewNode::For(node) => check_view(&node.body, states, known_components, diagnostics),
             ViewNode::Event(event) => check_statements(&event.body.statements, states, diagnostics),
             _ => {}
         }
     }
 }
 
-fn check_element(element: &ElementNode, states: &HashSet<String>, diagnostics: &mut Diagnostics) {
-    let standard = [
-        "Text", "Button", "Input", "Image", "Form", "Anchor", "Box", "Row", "Column", "Grid",
-        "Stack",
-    ];
-    if !standard.contains(&element.name.as_str()) {
+fn check_element(
+    element: &ElementNode,
+    states: &HashSet<String>,
+    known_components: &HashSet<String>,
+    diagnostics: &mut Diagnostics,
+) {
+    if !known_components.contains(&element.name) {
         diagnostics.push(Diagnostic::warning(
             "LUME3004",
             format!("unknown component `{}`", element.name),
@@ -107,7 +135,7 @@ fn check_element(element: &ElementNode, states: &HashSet<String>, diagnostics: &
         ));
     }
     if let Some(children) = &element.children {
-        check_view(children, states, diagnostics);
+        check_view(children, states, known_components, diagnostics);
     }
 }
 
@@ -133,11 +161,38 @@ fn has_attr(element: &ElementNode, name: &str) -> bool {
             .any(|arg| matches!(arg, Arg::Named(arg_name, _) if arg_name == name))
 }
 
+fn standard_component_symbols() -> HashSet<String> {
+    [
+        "Text",
+        "Button",
+        "Input",
+        "Image",
+        "Form",
+        "Anchor",
+        "Box",
+        "Row",
+        "Column",
+        "Grid",
+        "Stack",
+        "Link",
+        "NavLink",
+        "Outlet",
+        "Field",
+        "VisuallyHidden",
+        "FocusTrap",
+        "Landmark",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::check;
+    use super::{check, check_with_known_components};
     use lume_hir::lower;
     use lume_parser::parse;
+    use std::collections::HashSet;
 
     #[test]
     fn reports_missing_input_label() {
@@ -199,5 +254,32 @@ component App {
             .as_slice()
             .iter()
             .any(|diagnostic| diagnostic.code == "LUME3005"));
+    }
+
+    #[test]
+    fn accepts_known_custom_component() {
+        let source = r#"
+component Card {
+  view {
+    Text("Card")
+  }
+}
+
+component App {
+  view {
+    Card()
+  }
+}
+"#;
+        let (program, parse_diags) = parse(source);
+        assert!(!parse_diags.has_errors());
+        let mut known = HashSet::new();
+        known.insert("Text".to_string());
+        known.insert("Card".to_string());
+        let diagnostics = check_with_known_components(&lower(program), &known);
+        assert!(!diagnostics
+            .as_slice()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "LUME3004"));
     }
 }

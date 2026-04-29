@@ -1,0 +1,12 @@
+import { Card, card } from "./Card.lume"
+
+component App {
+  view {
+    Column gap=12 padding=24 {
+      Text("Composed project")
+      Card(title="Imported Card") {
+        Text("This component, prop, slot, and style came from Card.lume")
+      }
+    }
+  }
+}

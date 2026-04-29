@@ -21,9 +21,12 @@ pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
         let hir = lume_hir::lower(program);
         diagnostics
             .extend(lume_resolver::resolve_with_base(&hir, options.entry.parent()).into_vec());
-        diagnostics.extend(lume_typeck::check(&hir).into_vec());
+        let component_symbols =
+            lume_resolver::component_symbols_with_base(&hir, options.entry.parent());
+        diagnostics
+            .extend(lume_typeck::check_with_known_components(&hir, &component_symbols).into_vec());
         if !diagnostics.has_errors() {
-            match lume_ir::build(&hir) {
+            match lume_ir::build_with_base(&hir, options.entry.parent()) {
                 Ok(ir) => {
                     let html = lume_codegen_html::generate(&ir);
                     let css = lume_codegen_css::generate(&ir);
@@ -66,9 +69,12 @@ pub fn check(options: BuildOptions) -> io::Result<BuildResult> {
         let hir = lume_hir::lower(program);
         diagnostics
             .extend(lume_resolver::resolve_with_base(&hir, options.entry.parent()).into_vec());
-        diagnostics.extend(lume_typeck::check(&hir).into_vec());
+        let component_symbols =
+            lume_resolver::component_symbols_with_base(&hir, options.entry.parent());
+        diagnostics
+            .extend(lume_typeck::check_with_known_components(&hir, &component_symbols).into_vec());
         if !diagnostics.has_errors() {
-            if let Err(more) = lume_ir::build(&hir) {
+            if let Err(more) = lume_ir::build_with_base(&hir, options.entry.parent()) {
                 diagnostics.extend(more.into_vec());
             }
         }

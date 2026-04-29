@@ -1,4 +1,4 @@
-use lume_ast::{Arg, AssignOp, ElementNode, Expr, Stmt, ViewBlock, ViewNode};
+use lume_ast::{Arg, AssignOp, ComponentItem, ElementNode, Expr, Stmt, ViewBlock, ViewNode};
 use lume_codegen_css::{layout_class, style_class_for, style_ref_class};
 use lume_codegen_html::{EventBinding, HtmlOutput};
 use lume_ir::LumeProgram;
@@ -9,7 +9,9 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         .states()
         .map(|state| state.name.clone())
         .collect::<HashSet<_>>();
-    let dynamic_view = program.view().is_some_and(view_has_dynamic);
+    let dynamic_view = program
+        .view()
+        .is_some_and(|view| view_has_dynamic(view, program));
     let mut js = String::new();
     js.push_str("const fallbackState = {\n");
     for state in program.states() {
@@ -52,6 +54,7 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
                 &mut ctx,
                 &HashSet::new(),
                 &state_names,
+                program,
             ));
             js.push_str(";\n");
             js.push_str("}\n\n");
@@ -169,6 +172,7 @@ struct RenderCtx {
     next_node: usize,
     next_event: usize,
     loop_params: Vec<String>,
+    component_stack: Vec<String>,
 }
 
 fn render_view_expr(
@@ -176,10 +180,11 @@ fn render_view_expr(
     ctx: &mut RenderCtx,
     locals: &HashSet<String>,
     states: &HashSet<String>,
+    program: &LumeProgram,
 ) -> String {
     let mut template = String::from("`");
     for node in &view.nodes {
-        template.push_str(&render_node_template(node, ctx, locals, states));
+        template.push_str(&render_node_template(node, ctx, locals, states, program));
     }
     template.push('`');
     template
@@ -190,16 +195,19 @@ fn render_node_template(
     ctx: &mut RenderCtx,
     locals: &HashSet<String>,
     states: &HashSet<String>,
+    program: &LumeProgram,
 ) -> String {
     match node {
-        ViewNode::Element(element) => render_element_template(element, ctx, locals, states),
+        ViewNode::Element(element) => {
+            render_element_template(element, ctx, locals, states, program)
+        }
         ViewNode::Text(text) => render_text_template(&text.value, locals, states),
         ViewNode::If(node) => {
-            let then_html = render_view_expr(&node.then_block, ctx, locals, states);
+            let then_html = render_view_expr(&node.then_block, ctx, locals, states, program);
             let else_html = node
                 .else_block
                 .as_ref()
-                .map(|block| render_view_expr(block, ctx, locals, states))
+                .map(|block| render_view_expr(block, ctx, locals, states, program))
                 .unwrap_or_else(|| "``".into());
             format!(
                 "${{{} ? {} : {}}}",
@@ -215,7 +223,7 @@ fn render_node_template(
             child_locals.insert(index.clone());
             ctx.loop_params.push(node.item.clone());
             ctx.loop_params.push(index.clone());
-            let body = render_view_expr(&node.body, ctx, &child_locals, states);
+            let body = render_view_expr(&node.body, ctx, &child_locals, states, program);
             ctx.loop_params.pop();
             ctx.loop_params.pop();
             format!(
@@ -238,7 +246,11 @@ fn render_element_template(
     ctx: &mut RenderCtx,
     locals: &HashSet<String>,
     states: &HashSet<String>,
+    program: &LumeProgram,
 ) -> String {
+    if program.component_named(&element.name).is_some() {
+        return render_component_template(element, ctx, locals, states, program);
+    }
     match element.name.as_str() {
         "Text" => {
             let expr = first_arg(element).cloned().unwrap_or(Expr {
@@ -250,8 +262,30 @@ fn render_element_template(
         "Button" => render_button_template(element, ctx, locals, states),
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
-        _ => render_container_template(element, ctx, locals, states),
+        _ => render_container_template(element, ctx, locals, states, program),
     }
+}
+
+fn render_component_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+    program: &LumeProgram,
+) -> String {
+    let Some(component) = program.component_named(&element.name) else {
+        return String::new();
+    };
+    if ctx.component_stack.contains(&component.name) {
+        return String::new();
+    }
+    let Some(view) = program.expand_component_view(component, element) else {
+        return String::new();
+    };
+    ctx.component_stack.push(component.name.clone());
+    let html = render_view_expr(&view, ctx, locals, states, program);
+    ctx.component_stack.pop();
+    format!("${{{html}}}")
 }
 
 fn render_text_template(expr: &Expr, locals: &HashSet<String>, states: &HashSet<String>) -> String {
@@ -343,6 +377,7 @@ fn render_container_template(
     ctx: &mut RenderCtx,
     locals: &HashSet<String>,
     states: &HashSet<String>,
+    program: &LumeProgram,
 ) -> String {
     let id = node_id(ctx);
     let class_attr = class_attr(element);
@@ -350,7 +385,7 @@ fn render_container_template(
         .children
         .as_ref()
         .map(|view| {
-            let expr = render_view_expr(view, ctx, locals, states);
+            let expr = render_view_expr(view, ctx, locals, states, program);
             format!("${{{expr}}}")
         })
         .unwrap_or_default();
@@ -476,14 +511,27 @@ fn node_id(ctx: &mut RenderCtx) -> String {
     format!("n{}", ctx.next_node)
 }
 
-fn view_has_dynamic(view: &ViewBlock) -> bool {
-    view.nodes.iter().any(node_has_dynamic)
+fn view_has_dynamic(view: &ViewBlock, program: &LumeProgram) -> bool {
+    view.nodes
+        .iter()
+        .any(|node| node_has_dynamic(node, program))
 }
 
-fn node_has_dynamic(node: &ViewNode) -> bool {
+fn node_has_dynamic(node: &ViewNode, program: &LumeProgram) -> bool {
     match node {
         ViewNode::If(_) | ViewNode::For(_) => true,
-        ViewNode::Element(element) => element.children.as_ref().is_some_and(view_has_dynamic),
+        ViewNode::Element(element) => {
+            if let Some(component) = program.component_named(&element.name) {
+                return component.items.iter().any(|item| match item {
+                    ComponentItem::View(view) => view_has_dynamic(view, program),
+                    _ => false,
+                });
+            }
+            element
+                .children
+                .as_ref()
+                .is_some_and(|view| view_has_dynamic(view, program))
+        }
         _ => false,
     }
 }

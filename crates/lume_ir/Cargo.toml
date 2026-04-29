@@ -7,6 +7,7 @@ edition.workspace = true
 lume_ast = { path = "../lume_ast" }
 lume_diagnostics = { path = "../lume_diagnostics" }
 lume_hir = { path = "../lume_hir" }
+lume_parser = { path = "../lume_parser" }
 
 [lib]
 path = "src/lib.rs"

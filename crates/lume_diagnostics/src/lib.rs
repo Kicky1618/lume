@@ -85,9 +85,60 @@ pub fn emit(diagnostics: &[Diagnostic], file: Option<&SourceFile>) -> String {
             out.push_str(&format!("  --> {}:{line}:{col}\n", file.path.display()));
             if let Some(text) = file.line_text(line) {
                 out.push_str(&format!("{line:>4} | {text}\n"));
-                out.push_str(&format!("     | {}^\n", " ".repeat(col.saturating_sub(1))));
+                let marker_width = span.end.saturating_sub(span.start).max(1);
+                out.push_str(&format!(
+                    "     | {}{}\n",
+                    " ".repeat(col.saturating_sub(1)),
+                    "^".repeat(marker_width)
+                ));
             }
         }
     }
+    if !diagnostics.is_empty() {
+        let errors = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count();
+        let warnings = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+            .count();
+        out.push_str(&format!(
+            "{}{}, {}{}\n",
+            errors,
+            if errors == 1 { " error" } else { " errors" },
+            warnings,
+            if warnings == 1 {
+                " warning"
+            } else {
+                " warnings"
+            }
+        ));
+    }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emit, Diagnostic};
+    use lume_span::{SourceFile, Span};
+    use std::path::PathBuf;
+
+    #[test]
+    fn emits_caret_width_and_summary() {
+        let file = SourceFile {
+            id: 0,
+            path: PathBuf::from("app.lume"),
+            source: "component App {}\n".into(),
+        };
+        let output = emit(
+            &[
+                Diagnostic::error("LUME0001", "bad", Some(Span::new(0, 9))),
+                Diagnostic::warning("LUME0002", "soft", None),
+            ],
+            Some(&file),
+        );
+        assert!(output.contains("^^^^^^^^^"));
+        assert!(output.contains("1 error, 1 warning"));
+    }
 }

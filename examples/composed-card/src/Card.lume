@@ -1,0 +1,15 @@
+export style card {
+  padding: 18
+  margin: 8
+  width: 320
+  hover background: "#eef6ff"
+}
+
+export component Card(title: String = "Imported Card") {
+  view {
+    Box style=card {
+      Text("{title} chimpo")
+      slot
+    }
+  }
+}
