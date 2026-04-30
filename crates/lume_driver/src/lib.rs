@@ -1,10 +1,17 @@
+use lume_backend_native::{
+    DynamicLibraryResolver, NativeAbiType, NativeBackend, NativeBridgeModule, NativeBridgePlan,
+    NativeSymbol, ResolvedNativeModule,
+};
 use lume_diagnostics::{emit, Diagnostic};
+use lume_ffi::FfiRegistry;
 use lume_session::{BuildOptions, Session};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::os::raw::c_int;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -13,6 +20,29 @@ use std::time::{Duration, SystemTime};
 pub struct BuildResult {
     pub diagnostics: Vec<Diagnostic>,
     pub emitted: Vec<String>,
+}
+
+#[repr(C)]
+struct NativeBytes {
+    ptr: *mut u8,
+    len: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+enum NativeScalarValue {
+    I32(i32),
+    I64(i64),
+    U64(u64),
+    F64(f64),
+    Bool(bool),
+}
+
+#[derive(Debug)]
+struct NativeBridgeRuntime {
+    plan: NativeBridgePlan,
+    resolved: Vec<ResolvedNativeModule>,
+    _resolver: DynamicLibraryResolver,
 }
 
 pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
@@ -206,6 +236,19 @@ fn handle_connection(mut stream: TcpStream, options: &BuildOptions) -> io::Resul
         }
     }
 
+    if matches!(method, "GET" | "HEAD") {
+        if let Some((module_name, symbol_name, args)) = native_bridge_id_from_target(target) {
+            return handle_native_request(
+                &mut stream,
+                options,
+                &module_name,
+                &symbol_name,
+                &args,
+                method != "HEAD",
+            );
+        }
+    }
+
     if method != "GET" && method != "HEAD" {
         return write_response(
             &mut stream,
@@ -344,6 +387,38 @@ fn action_id_from_target(target: &str) -> Option<String> {
     percent_decode(id)
 }
 
+fn native_bridge_id_from_target(target: &str) -> Option<(String, String, Vec<String>)> {
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    let path = path.strip_prefix("/__lume/native/")?;
+    let mut segments = path.split('/');
+    let module = percent_decode(segments.next()?)?;
+    let symbol = percent_decode(segments.next()?)?;
+    if segments.next().is_some() {
+        return None;
+    }
+    let query = target
+        .split_once('?')
+        .map(|(_, query)| query.split('#').next().unwrap_or(query))
+        .unwrap_or("");
+    let args = native_bridge_query_args(query);
+    Some((module, symbol, args))
+}
+
+fn native_bridge_query_args(query: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    for item in query.split('&') {
+        let Some((key, value)) = item.split_once('=') else {
+            continue;
+        };
+        if key == "args" {
+            if let Some(value) = percent_decode_query(value) {
+                args.push(value);
+            }
+        }
+    }
+    args
+}
+
 fn handle_action_request(
     stream: &mut TcpStream,
     options: &BuildOptions,
@@ -353,7 +428,8 @@ fn handle_action_request(
 ) -> io::Result<()> {
     let runtime = server_runtime(options)?;
     let context = lume_runtime_server::ActionRequestContext {
-        csrf_token: request_header(headers, "x-lume-csrf").or_else(|| Some("dev-csrf-token".into())),
+        csrf_token: request_header(headers, "x-lume-csrf")
+            .or_else(|| Some("dev-csrf-token".into())),
         authenticated: request_header(headers, "authorization").is_some()
             || request_header(headers, "cookie")
                 .is_some_and(|cookie| cookie.contains("lume_session=")),
@@ -384,6 +460,284 @@ fn handle_action_request(
             )
         }
     }
+}
+
+fn handle_native_request(
+    stream: &mut TcpStream,
+    options: &BuildOptions,
+    module_name: &str,
+    symbol_name: &str,
+    args: &[String],
+    include_body: bool,
+) -> io::Result<()> {
+    let runtime = match native_bridge_runtime(options) {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let body = err.to_string();
+            return write_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                include_body,
+                body.as_bytes(),
+            );
+        }
+    };
+    let Some((module, resolved_module)) = runtime.module(module_name) else {
+        return write_response(
+            stream,
+            "404 Not Found",
+            "text/plain; charset=utf-8",
+            include_body,
+            b"Unknown native module",
+        );
+    };
+    let bytes = match invoke_native_buffer(module, resolved_module, symbol_name, args) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return write_response(
+                stream,
+                "500 Internal Server Error",
+                "text/plain; charset=utf-8",
+                include_body,
+                err.as_bytes(),
+            );
+        }
+    };
+    write_response(
+        stream,
+        "200 OK",
+        "application/octet-stream",
+        include_body,
+        &bytes,
+    )
+}
+
+fn native_bridge_runtime(options: &BuildOptions) -> io::Result<NativeBridgeRuntime> {
+    let source = fs::read_to_string(&options.entry)?;
+    let (program, diagnostics) = lume_parser::parse(&source);
+    if diagnostics.has_errors() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "cannot execute native bridge because parsing failed",
+        ));
+    }
+    let hir = lume_hir::lower(program);
+    let ir = lume_ir::build_with_base(&hir, options.entry.parent()).map_err(|diagnostics| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot execute native bridge because IR build failed with {} diagnostics",
+                diagnostics.as_slice().len()
+            ),
+        )
+    })?;
+    let ffi_registry = FfiRegistry::from_ast(
+        &ir.ffi_modules,
+        &ir.ffi_structs,
+        &ir.ffi_enums,
+        &ir.ffi_opaques,
+    );
+    let plan = NativeBackend.plan_ffi(&ffi_registry).map_err(|errors| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "cannot execute native bridge because {} FFI errors",
+                errors.len()
+            ),
+        )
+    })?;
+    let resolver = DynamicLibraryResolver::default();
+    let resolved = plan.resolve(&resolver).map_err(|errors| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "cannot resolve native bridge symbols: {}",
+                errors
+                    .iter()
+                    .map(|error| error.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        )
+    })?;
+    Ok(NativeBridgeRuntime {
+        plan,
+        resolved,
+        _resolver: resolver,
+    })
+}
+
+impl NativeBridgeRuntime {
+    fn module(&self, name: &str) -> Option<(&NativeBridgeModule, &ResolvedNativeModule)> {
+        self.plan
+            .modules
+            .iter()
+            .zip(self.resolved.iter())
+            .find(|(module, _)| module.name == name)
+            .map(|(module, resolved)| (module, resolved))
+    }
+}
+
+fn invoke_native_buffer(
+    module: &NativeBridgeModule,
+    resolved_module: &ResolvedNativeModule,
+    symbol_name: &str,
+    args: &[String],
+) -> Result<Vec<u8>, String> {
+    let Some(symbol) = module
+        .symbols
+        .iter()
+        .find(|candidate| candidate.native_name == symbol_name)
+    else {
+        return Err(format!("unknown native symbol `{symbol_name}`"));
+    };
+    if !matches!(symbol.result, NativeAbiType::Buffer) {
+        return Err(format!(
+            "native symbol `{symbol_name}` does not return a buffer"
+        ));
+    }
+    let Some(resolved_symbol) = resolved_module
+        .symbols
+        .iter()
+        .find(|candidate| candidate.name == symbol_name)
+    else {
+        return Err(format!("native symbol `{symbol_name}` was not resolved"));
+    };
+    let values = parse_native_args(symbol, args)?;
+    let out = call_native_buffer(resolved_symbol.address, &symbol.params, &values)?;
+    copy_native_bytes(module, resolved_module, symbol, out)
+}
+
+fn parse_native_args(
+    symbol: &NativeSymbol,
+    args: &[String],
+) -> Result<Vec<NativeScalarValue>, String> {
+    if symbol.params.len() != args.len() {
+        return Err(format!(
+            "native symbol `{}` expected {} args, got {}",
+            symbol.native_name,
+            symbol.params.len(),
+            args.len()
+        ));
+    }
+    symbol
+        .params
+        .iter()
+        .zip(args)
+        .map(|(ty, value)| parse_native_arg(ty, value))
+        .collect()
+}
+
+fn parse_native_arg(ty: &NativeAbiType, raw: &str) -> Result<NativeScalarValue, String> {
+    match ty {
+        NativeAbiType::Scalar(name) => match name.as_str() {
+            "i32" => raw
+                .parse::<i32>()
+                .map(NativeScalarValue::I32)
+                .map_err(|_| format!("native argument `{raw}` is not a valid i32")),
+            "i64" => raw
+                .parse::<i64>()
+                .map(NativeScalarValue::I64)
+                .map_err(|_| format!("native argument `{raw}` is not a valid i64")),
+            "u64" => raw
+                .parse::<u64>()
+                .map(NativeScalarValue::U64)
+                .map_err(|_| format!("native argument `{raw}` is not a valid u64")),
+            "f64" => raw
+                .parse::<f64>()
+                .map(NativeScalarValue::F64)
+                .map_err(|_| format!("native argument `{raw}` is not a valid f64")),
+            "bool" => match raw {
+                "true" => Ok(NativeScalarValue::Bool(true)),
+                "false" => Ok(NativeScalarValue::Bool(false)),
+                _ => Err(format!("native argument `{raw}` is not a valid bool")),
+            },
+            other => Err(format!("native scalar type `{other}` is not supported yet")),
+        },
+        NativeAbiType::Enum { repr, .. } => {
+            parse_native_arg(&NativeAbiType::Scalar(repr.clone()), raw)
+        }
+        _ => Err(format!(
+            "native argument type `{ty:?}` is not supported yet"
+        )),
+    }
+}
+
+fn call_native_buffer(
+    address: usize,
+    params: &[NativeAbiType],
+    values: &[NativeScalarValue],
+) -> Result<NativeBytes, String> {
+    match (params, values) {
+        (
+            [NativeAbiType::Scalar(a), NativeAbiType::Scalar(b), NativeAbiType::Scalar(c), NativeAbiType::Scalar(d), NativeAbiType::Scalar(e), NativeAbiType::Scalar(f)],
+            [NativeScalarValue::I32(a_value), NativeScalarValue::I32(b_value), NativeScalarValue::I32(c_value), NativeScalarValue::F64(d_value), NativeScalarValue::F64(e_value), NativeScalarValue::F64(f_value)],
+        ) if a == "i32" && b == "i32" && c == "i32" && d == "f64" && e == "f64" && f == "f64" => {
+            let function: unsafe extern "C" fn(
+                i32,
+                i32,
+                i32,
+                f64,
+                f64,
+                f64,
+                *mut NativeBytes,
+            ) -> c_int = unsafe { std::mem::transmute(address) };
+            let mut out = NativeBytes {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            };
+            let status = unsafe {
+                function(
+                    *a_value, *b_value, *c_value, *d_value, *e_value, *f_value, &mut out,
+                )
+            };
+            if status != 0 {
+                Err(format!("native call returned status {status}"))
+            } else {
+                Ok(out)
+            }
+        }
+        _ => Err(format!(
+            "unsupported native buffer signature: params={params:?}, values={values:?}"
+        )),
+    }
+}
+
+fn copy_native_bytes(
+    module: &NativeBridgeModule,
+    resolved_module: &ResolvedNativeModule,
+    symbol: &NativeSymbol,
+    out: NativeBytes,
+) -> Result<Vec<u8>, String> {
+    if out.ptr.is_null() {
+        return Ok(Vec::new());
+    }
+    let bytes = if out.len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(out.ptr, out.len) }.to_vec()
+    };
+    let Some(free_name) = symbol.requires_free.as_deref() else {
+        return Err(format!(
+            "native symbol `{}` in module `{}` returned owned bytes without a free function",
+            symbol.native_name, module.name
+        ));
+    };
+    let Some(free_symbol) = resolved_module
+        .symbols
+        .iter()
+        .find(|candidate| candidate.name == free_name)
+    else {
+        return Err(format!(
+            "native free function `{free_name}` was not resolved"
+        ));
+    };
+    let free: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(free_symbol.address) };
+    unsafe {
+        free(out.ptr);
+    }
+    Ok(bytes)
 }
 
 fn server_runtime(options: &BuildOptions) -> io::Result<lume_runtime_server::ServerRuntime> {
@@ -519,6 +873,31 @@ fn percent_decode(input: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
+fn percent_decode_query(input: &str) -> Option<String> {
+    let mut out = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' => {
+                let hi = *bytes.get(i + 1)?;
+                let lo = *bytes.get(i + 2)?;
+                out.push(from_hex_pair(hi, lo)?);
+                i += 3;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 fn from_hex_pair(hi: u8, lo: u8) -> Option<u8> {
     Some(from_hex(hi)? * 16 + from_hex(lo)?)
 }
@@ -600,6 +979,7 @@ fn write_dist(
 ) -> io::Result<()> {
     let assets = options.out_dir.join("assets");
     fs::create_dir_all(&assets)?;
+    build_ffi_sources(options, ir)?;
     fs::write(options.out_dir.join("index.html"), html)?;
     fs::write(assets.join("style.css"), css)?;
     fs::write(assets.join("app.js"), js)?;
@@ -610,6 +990,79 @@ fn write_dist(
     fs::write(assets.join("lume.manifest.json"), manifest(ir))?;
     fs::write(assets.join("lume.backend.json"), backend_manifest(ir))?;
     Ok(())
+}
+
+fn build_ffi_sources(options: &BuildOptions, ir: &lume_ir::LumeProgram) -> io::Result<()> {
+    let project_root = project_root_for_entry(&options.entry);
+    for module in &ir.ffi_modules {
+        if module.sources.is_empty() {
+            continue;
+        }
+        let Some(library) = &module.library else {
+            continue;
+        };
+        let output = resolve_project_path(&project_root, library);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut command = Command::new(c_compiler_for(module.language.as_deref()));
+        if !matches!(module.language.as_deref(), Some("cpp" | "c++")) {
+            command.arg("-std=c11");
+        }
+        command.arg("-shared").arg("-fPIC");
+        for source in &module.sources {
+            command.arg(resolve_project_path(&project_root, source));
+        }
+        if let Some(header) = &module.header {
+            if let Some(include_dir) = resolve_project_path(&project_root, header).parent() {
+                command.arg("-I").arg(include_dir);
+            }
+        }
+        command.arg("-o").arg(&output);
+        let status = command.status().map_err(|err| {
+            io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to run native FFI compiler for `{}`: {err}",
+                    module.name
+                ),
+            )
+        })?;
+        if !status.success() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("native FFI compiler failed for `{}`", module.name),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn project_root_for_entry(entry: &Path) -> PathBuf {
+    let Some(parent) = entry.parent() else {
+        return PathBuf::from(".");
+    };
+    if parent.file_name().is_some_and(|name| name == "src") {
+        parent.parent().unwrap_or(parent).to_path_buf()
+    } else {
+        parent.to_path_buf()
+    }
+}
+
+fn resolve_project_path(project_root: &Path, value: &str) -> PathBuf {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    }
+}
+
+fn c_compiler_for(language: Option<&str>) -> &'static str {
+    match language {
+        Some("cpp" | "c++") => "c++",
+        _ => "cc",
+    }
 }
 
 fn manifest(ir: &lume_ir::LumeProgram) -> String {
@@ -733,13 +1186,36 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
                 .functions
                 .iter()
                 .map(|function| {
+                    let params = function
+                        .params
+                        .iter()
+                        .map(|param| {
+                            format!(
+                                "{{ \"name\": \"{}\", \"type\": \"{}\" }}",
+                                json_escape(&param.name),
+                                json_escape(&param.ty)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
                     format!(
-                        "{{ \"name\": \"{}\", \"return\": \"{}\", \"callback\": {}, \"ownership\": {} }}",
+                        "{{ \"name\": \"{}\", \"params\": [{}], \"return\": \"{}\", \"callback\": {}, \"ownership\": {}, \"free\": {}, \"throws\": {} }}",
                         json_escape(&function.name),
+                        params,
                         json_escape(&function.return_ty),
                         function.callback,
                         function
                             .ownership
+                            .as_ref()
+                            .map(|value| format!("\"{}\"", json_escape(value)))
+                            .unwrap_or_else(|| "null".into()),
+                        function
+                            .free
+                            .as_ref()
+                            .map(|value| format!("\"{}\"", json_escape(value)))
+                            .unwrap_or_else(|| "null".into()),
+                        function
+                            .throws
                             .as_ref()
                             .map(|value| format!("\"{}\"", json_escape(value)))
                             .unwrap_or_else(|| "null".into())
@@ -748,7 +1224,7 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "      {{ \"name\": \"{}\", \"language\": {}, \"library\": {}, \"header\": {}, \"sources\": [{}], \"functions\": [{}] }}",
+                "      {{ \"name\": \"{}\", \"language\": {}, \"library\": {}, \"header\": {}, \"sources\": [{}], \"runtime\": [{}], \"safety\": {}, \"threadSafe\": {}, \"lock\": {}, \"functions\": [{}] }}",
                 json_escape(&module.name),
                 module
                     .language
@@ -771,13 +1247,104 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
                     .map(|value| format!("\"{}\"", json_escape(value)))
                     .collect::<Vec<_>>()
                     .join(", "),
+                if module.runtime.is_empty() {
+                    "\"native\"".into()
+                } else {
+                    module
+                        .runtime
+                        .iter()
+                        .map(|value| format!("\"{}\"", json_escape(value)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                },
+                module
+                    .safety
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "\"safe\"".into()),
+                module
+                    .thread_safe
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "null".into()),
+                module
+                    .lock
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "null".into()),
                 functions
             )
         })
         .collect::<Vec<_>>()
         .join(",\n");
+    let ffi_structs = ir
+        .ffi_structs
+        .iter()
+        .map(|item| {
+            let fields = item
+                .fields
+                .iter()
+                .map(|field| {
+                    format!(
+                        "{{ \"name\": \"{}\", \"type\": \"{}\" }}",
+                        json_escape(&field.name),
+                        json_escape(&field.ty)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "      {{ \"name\": \"{}\", \"repr\": {}, \"fields\": [{}] }}",
+                json_escape(&item.name),
+                item.repr
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "\"C\"".into()),
+                fields
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let ffi_enums = ir
+        .ffi_enums
+        .iter()
+        .map(|item| {
+            format!(
+                "      {{ \"name\": \"{}\", \"repr\": {}, \"variants\": [{}] }}",
+                json_escape(&item.name),
+                item.repr
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "\"i32\"".into()),
+                item.variants
+                    .iter()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let ffi_opaques = ir
+        .ffi_opaques
+        .iter()
+        .map(|item| {
+            format!(
+                "      {{ \"name\": \"{}\", \"ownership\": {}, \"lifetime\": {} }}",
+                json_escape(&item.name),
+                item.ownership
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "null".into()),
+                item.lifetime
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "null".into())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
     format!(
-        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"html-js-css\",\n  \"backends\": [\"ssr\", \"wasm\", \"native\", \"jit\"],\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"html-js-css\",\n  \"backends\": [\"ssr\", \"wasm\", \"native\", \"jit\"],\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
         json_escape(&ir.component.name),
         states,
         routes,
@@ -786,16 +1353,48 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
         themes,
         actions,
         queries,
-        ffi
+        ffi,
+        ffi_structs,
+        ffi_enums,
+        ffi_opaques
     )
 }
 
 fn backend_manifest(ir: &lume_ir::LumeProgram) -> String {
+    let ffi_registry = lume_ffi::FfiRegistry::from_ast(
+        &ir.ffi_modules,
+        &ir.ffi_structs,
+        &ir.ffi_enums,
+        &ir.ffi_opaques,
+    );
+    let native_bridge = lume_backend_native::NativeBackend
+        .plan_ffi(&ffi_registry)
+        .map(|plan| plan.to_json())
+        .unwrap_or_else(|errors| {
+            let errors = errors
+                .iter()
+                .map(|error| {
+                    format!(
+                        "{{ \"module\": \"{}\", \"symbol\": {}, \"message\": \"{}\" }}",
+                        json_escape(&error.module),
+                        error
+                            .symbol
+                            .as_ref()
+                            .map(|symbol| format!("\"{}\"", json_escape(symbol)))
+                            .unwrap_or_else(|| "null".into()),
+                        json_escape(&error.message)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ \"modules\": [], \"errors\": [{}] }}", errors)
+        });
     format!(
-        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {} }},\n  \"wasm\": {{ \"enabled\": true, \"entry\": \"assets/app.wasm\", \"abi\": [\"lume_init\", \"lume_dispatch\", \"lume_free\"] }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
+        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {} }},\n  \"wasm\": {{ \"enabled\": true, \"entry\": \"assets/app.wasm\", \"abi\": [\"lume_init\", \"lume_dispatch\", \"lume_free\"] }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {}, \"bridge\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
         ir.routes.len(),
         ir.server_actions.len(),
         ir.ffi_modules.len(),
+        native_bridge,
         ir.server_actions
             .iter()
             .filter(|action| {

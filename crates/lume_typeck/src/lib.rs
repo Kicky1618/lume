@@ -15,6 +15,7 @@ pub fn check_with_known_components(
     let route_paths = collect_route_paths(program);
     let server_actions = collect_server_actions(program);
     check_server_actions(&server_actions, program, &mut diagnostics);
+    check_ffi(program, &mut diagnostics);
     let ctx = CheckCtx {
         route_paths: &route_paths,
         server_actions: &server_actions,
@@ -346,7 +347,10 @@ fn check_server_actions(
             if !serializable_type(&param.ty) {
                 diagnostics.push(Diagnostic::error(
                     "LUME2001",
-                    format!("server action `{}` uses non-serializable input `{}`", action.name, param.ty),
+                    format!(
+                        "server action `{}` uses non-serializable input `{}`",
+                        action.name, param.ty
+                    ),
                     Some(param.span),
                 ));
             }
@@ -376,7 +380,10 @@ fn check_server_actions(
         {
             diagnostics.push(Diagnostic::warning(
                 "LUME2005",
-                format!("server action `{}` may need an FFI bridge for jit runtime", action.name),
+                format!(
+                    "server action `{}` may need an FFI bridge for jit runtime",
+                    action.name
+                ),
                 Some(action.span),
             ));
         }
@@ -397,7 +404,10 @@ fn serializable_type(ty: &str) -> bool {
     if ty.ends_with('?') || ty.ends_with("[]") {
         return serializable_type(ty.trim_end_matches('?').trim_end_matches("[]"));
     }
-    if let Some(inner) = ty.strip_prefix("Array<").and_then(|value| value.strip_suffix('>')) {
+    if let Some(inner) = ty
+        .strip_prefix("Array<")
+        .and_then(|value| value.strip_suffix('>'))
+    {
         return serializable_type(inner);
     }
     if ty.starts_with("Result<") || ty.starts_with("Optional<") || ty.starts_with("Union<") {
@@ -429,6 +439,47 @@ fn serializable_type(ty: &str) -> bool {
             | "f64"
             | "f32"
     ) || ty.chars().next().is_some_and(|ch| ch.is_ascii_uppercase())
+}
+
+fn check_ffi(program: &HirProgram, diagnostics: &mut Diagnostics) {
+    let mut modules = Vec::new();
+    let mut structs = Vec::new();
+    let mut enums = Vec::new();
+    let mut opaques = Vec::new();
+    for decl in program.ast.declarations.iter().map(export_inner) {
+        match decl {
+            Decl::FfiModule(decl) => modules.push(decl.clone()),
+            Decl::FfiStruct(decl) => structs.push(decl.clone()),
+            Decl::FfiEnum(decl) => enums.push(decl.clone()),
+            Decl::FfiOpaque(decl) => opaques.push(decl.clone()),
+            _ => {}
+        }
+    }
+    if modules.is_empty() && structs.is_empty() && enums.is_empty() && opaques.is_empty() {
+        return;
+    }
+    let registry = lume_ffi::FfiRegistry::from_ast(&modules, &structs, &enums, &opaques);
+    for diagnostic in registry.validate().diagnostics {
+        let message = match diagnostic.symbol {
+            Some(symbol) => format!("{} ({symbol})", diagnostic.message),
+            None => diagnostic.message,
+        };
+        diagnostics.push(match diagnostic.severity {
+            lume_ffi::FfiSeverity::Error => {
+                Diagnostic::error(diagnostic.code, message, Some(program.ast.span))
+            }
+            lume_ffi::FfiSeverity::Warning => {
+                Diagnostic::warning(diagnostic.code, message, Some(program.ast.span))
+            }
+        });
+    }
+}
+
+fn export_inner(decl: &Decl) -> &Decl {
+    match decl {
+        Decl::Export(inner) => inner,
+        _ => decl,
+    }
 }
 
 fn collect_route_paths(program: &HirProgram) -> HashSet<String> {

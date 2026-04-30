@@ -10,6 +10,8 @@ lume_codegen_js = { path = "../lume_codegen_js" }
 lume_codegen_wasm = { path = "../lume_codegen_wasm" }
 lume_diagnostics = { path = "../lume_diagnostics" }
 lume_formatter = { path = "../lume_formatter" }
+lume_backend_native = { path = "../lume_backend_native" }
+lume_ffi = { path = "../lume_ffi" }
 lume_hir = { path = "../lume_hir" }
 lume_ir = { path = "../lume_ir" }
 lume_parser = { path = "../lume_parser" }

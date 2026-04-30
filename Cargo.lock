@@ -101,6 +101,9 @@ dependencies = [
 [[package]]
 name = "lume_backend_native"
 version = "0.2.0"
+dependencies = [
+ "lume_ffi",
+]
 
 [[package]]
 name = "lume_codegen_css"
@@ -159,11 +162,13 @@ dependencies = [
 name = "lume_driver"
 version = "0.2.0"
 dependencies = [
+ "lume_backend_native",
  "lume_codegen_css",
  "lume_codegen_html",
  "lume_codegen_js",
  "lume_codegen_wasm",
  "lume_diagnostics",
+ "lume_ffi",
  "lume_formatter",
  "lume_hir",
  "lume_ir",
@@ -177,6 +182,9 @@ dependencies = [
 [[package]]
 name = "lume_ffi"
 version = "0.2.0"
+dependencies = [
+ "lume_ast",
+]
 
 [[package]]
 name = "lume_formatter"
@@ -264,6 +272,7 @@ version = "0.2.0"
 dependencies = [
  "lume_ast",
  "lume_diagnostics",
+ "lume_ffi",
  "lume_hir",
  "lume_parser",
 ]

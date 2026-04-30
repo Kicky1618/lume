@@ -1,0 +1,4 @@
+[project]
+name = "ffi-lab"
+entry = "src/app.lume"
+out_dir = "dist"

@@ -16,6 +16,7 @@ pub enum TokenKind {
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
+    pub line_break_before: bool,
 }
 
 const KEYWORDS: &[&str] = &[
@@ -77,6 +78,7 @@ pub fn lex(source: &str) -> (Vec<Token>, Diagnostics) {
         pos: 0,
         diagnostics: Diagnostics::default(),
         tokens: Vec::new(),
+        line_break_pending: false,
     };
     lexer.run();
     (lexer.tokens, lexer.diagnostics)
@@ -87,12 +89,16 @@ struct Lexer<'a> {
     pos: usize,
     diagnostics: Diagnostics,
     tokens: Vec<Token>,
+    line_break_pending: bool,
 }
 
 impl Lexer<'_> {
     fn run(&mut self) {
         while let Some(ch) = self.peek() {
             if ch.is_whitespace() {
+                if ch == '\n' || ch == '\r' {
+                    self.line_break_pending = true;
+                }
                 self.bump();
                 continue;
             }
@@ -105,19 +111,22 @@ impl Lexer<'_> {
                 continue;
             }
             let start = self.pos;
+            let line_break_before = self.line_break_pending;
+            self.line_break_pending = false;
             match ch {
-                '"' | '\'' => self.string(ch, start),
-                '0'..='9' => self.number(start),
-                c if is_ident_start(c) => self.ident(start),
+                '"' | '\'' => self.string(ch, start, line_break_before),
+                '0'..='9' => self.number(start, line_break_before),
+                c if is_ident_start(c) => self.ident(start, line_break_before),
                 '{' | '}' | '(' | ')' | '[' | ']' | ',' | ':' | ';' | '.' => {
                     self.bump();
                     self.tokens.push(Token {
                         kind: TokenKind::Symbol(ch),
                         span: Span::new(start, self.pos),
+                        line_break_before,
                     });
                 }
                 '+' | '-' | '*' | '/' | '=' | '!' | '<' | '>' | '&' | '|' | '?' => {
-                    self.operator(start)
+                    self.operator(start, line_break_before)
                 }
                 _ => {
                     self.bump();
@@ -132,10 +141,11 @@ impl Lexer<'_> {
         self.tokens.push(Token {
             kind: TokenKind::Eof,
             span: Span::new(self.pos, self.pos),
+            line_break_before: self.line_break_pending,
         });
     }
 
-    fn ident(&mut self, start: usize) {
+    fn ident(&mut self, start: usize, line_break_before: bool) {
         while self.peek().is_some_and(is_ident_continue) {
             self.bump();
         }
@@ -148,10 +158,11 @@ impl Lexer<'_> {
         self.tokens.push(Token {
             kind,
             span: Span::new(start, self.pos),
+            line_break_before,
         });
     }
 
-    fn number(&mut self, start: usize) {
+    fn number(&mut self, start: usize, line_break_before: bool) {
         while self
             .peek()
             .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
@@ -161,10 +172,11 @@ impl Lexer<'_> {
         self.tokens.push(Token {
             kind: TokenKind::Number(self.source[start..self.pos].to_string()),
             span: Span::new(start, self.pos),
+            line_break_before,
         });
     }
 
-    fn string(&mut self, quote: char, start: usize) {
+    fn string(&mut self, quote: char, start: usize, line_break_before: bool) {
         self.bump();
         let mut value = String::new();
         while let Some(ch) = self.peek() {
@@ -173,6 +185,7 @@ impl Lexer<'_> {
                 self.tokens.push(Token {
                     kind: TokenKind::String(value),
                     span: Span::new(start, self.pos),
+                    line_break_before,
                 });
                 return;
             }
@@ -200,7 +213,8 @@ impl Lexer<'_> {
         ));
     }
 
-    fn operator(&mut self, start: usize) {
+    fn operator(&mut self, start: usize, line_break_before: bool) {
+        self.line_break_pending = false;
         let first = self.bump().unwrap();
         let mut op = String::from(first);
         while let Some(next) = self.peek() {
@@ -229,6 +243,7 @@ impl Lexer<'_> {
         self.tokens.push(Token {
             kind: TokenKind::Operator(op),
             span: Span::new(start, self.pos),
+            line_break_before,
         });
     }
 
@@ -240,13 +255,23 @@ impl Lexer<'_> {
 
     fn skip_block_comment(&mut self) {
         let start = self.pos;
+        let mut saw_line_break = false;
         self.bump();
         self.bump();
         while let Some(ch) = self.bump() {
+            if ch == '\n' || ch == '\r' {
+                saw_line_break = true;
+            }
             if ch == '*' && self.peek() == Some('/') {
                 self.bump();
+                if saw_line_break {
+                    self.line_break_pending = true;
+                }
                 return;
             }
+        }
+        if saw_line_break {
+            self.line_break_pending = true;
         }
         self.diagnostics.push(Diagnostic::error(
             "LUME1003",
@@ -278,4 +303,25 @@ fn is_ident_start(ch: char) -> bool {
 
 fn is_ident_continue(ch: char) -> bool {
     ch == '_' || ch == '-' || ch.is_alphanumeric()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{lex, TokenKind};
+
+    #[test]
+    fn marks_tokens_after_newlines() {
+        let source = "result = await prepareRender(prompt, width, height)\nstatus = result";
+        let (tokens, diagnostics) = lex(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let status = tokens
+            .iter()
+            .find(|token| matches!(&token.kind, TokenKind::Ident(value) if value == "status"))
+            .expect("expected status token");
+        assert!(status.line_break_before);
+    }
 }

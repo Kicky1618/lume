@@ -3,5 +3,8 @@ name = "lume_backend_native"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+lume_ffi = { path = "../lume_ffi", default-features = false }
+
 [lib]
 path = "src/lib.rs"

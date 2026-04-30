@@ -49,7 +49,9 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str(
             "  if (!response.ok) throw new Error(payload.error || `Server Action ${id} failed`);\n",
         );
-        js.push_str("  for (const key of payload.revalidate || []) lumeQueryCache.invalidate(key);\n");
+        js.push_str(
+            "  for (const key of payload.revalidate || []) lumeQueryCache.invalidate(key);\n",
+        );
         js.push_str("  return payload.value;\n");
         js.push_str("}\n\n");
         for action in &program.server_actions {
@@ -129,6 +131,7 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str("function render_all() {\n");
         js.push_str("  const focus = captureFocus();\n");
         js.push_str("  root.innerHTML = render_app();\n");
+        js.push_str("  void drawNativeCanvases();\n");
         if !program.routes.is_empty() {
             js.push_str("  updateNavLinks();\n");
         }
@@ -184,8 +187,44 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         for binding in &html.bindings {
             js.push_str(&format!("  {}();\n", render_name(&binding.node_id)));
         }
+        js.push_str("  void drawNativeCanvases();\n");
         js.push_str("}\n\n");
     }
+    js.push_str("async function drawNativeCanvases() {\n");
+    js.push_str("  for (const canvas of root.querySelectorAll('canvas[data-lume-native-module][data-lume-native-symbol]')) {\n");
+    js.push_str(
+        "    const width = Math.max(1, Math.floor(Number(canvas.getAttribute('width') || 640)));\n",
+    );
+    js.push_str("    const height = Math.max(1, Math.floor(Number(canvas.getAttribute('height') || 360)));\n");
+    js.push_str("    if (canvas.width !== width) canvas.width = width;\n");
+    js.push_str("    if (canvas.height !== height) canvas.height = height;\n");
+    js.push_str("    const moduleName = canvas.dataset.lumeNativeModule || '';\n");
+    js.push_str("    const symbolName = canvas.dataset.lumeNativeSymbol || '';\n");
+    js.push_str("    const argNames = String(canvas.dataset.lumeNativeArgs || '').split(',').map(value => value.trim()).filter(Boolean);\n");
+    js.push_str("    const renderKey = [moduleName, symbolName, width, height, ...argNames.map(name => canvas.dataset[name] || '')].join('|');\n");
+    js.push_str("    const readyKey = canvas.dataset.lumeNativeRenderKey || '';\n");
+    js.push_str("    const pendingKey = canvas.dataset.lumeNativePendingKey || '';\n");
+    js.push_str("    if (readyKey === renderKey || pendingKey === renderKey) continue;\n");
+    js.push_str("    canvas.dataset.lumeNativePendingKey = renderKey;\n");
+    js.push_str("    const url = new URL(`/__lume/native/${encodeURIComponent(moduleName)}/${encodeURIComponent(symbolName)}`, window.location.href);\n");
+    js.push_str("    for (const name of argNames) {\n");
+    js.push_str("      const value = canvas.dataset[name];\n");
+    js.push_str("      if (value !== undefined) url.searchParams.append('args', value);\n");
+    js.push_str("    }\n");
+    js.push_str("    try {\n");
+    js.push_str("      const response = await fetch(url);\n");
+    js.push_str("      if (!response.ok) continue;\n");
+    js.push_str("      const pixels = new Uint8ClampedArray(await response.arrayBuffer());\n");
+    js.push_str("      if (pixels.byteLength !== width * height * 4) continue;\n");
+    js.push_str("      const ctx = canvas.getContext('2d');\n");
+    js.push_str("      if (!ctx) continue;\n");
+    js.push_str("      ctx.putImageData(new ImageData(pixels, width, height), 0, 0);\n");
+    js.push_str("      canvas.dataset.lumeNativeRenderKey = renderKey;\n");
+    js.push_str("    } catch (_) {} finally {\n");
+    js.push_str("      if (canvas.dataset.lumeNativePendingKey === renderKey) delete canvas.dataset.lumeNativePendingKey;\n");
+    js.push_str("    }\n");
+    js.push_str("  }\n");
+    js.push_str("}\n\n");
     js.push_str("const actions = {\n");
     for event in &html.events {
         js.push_str(&format!("  async {}(event, target) {{\n", event.id));
@@ -356,6 +395,7 @@ fn render_element_template(
         "Button" => render_button_template(element, ctx, locals, states),
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
+        "MandelbrotSet" => render_mandelbrot_set_template(element, ctx, locals, states),
         "Link" | "NavLink" | "Anchor" => {
             render_link_template(element, ctx, locals, states, program)
         }
@@ -544,6 +584,40 @@ fn render_image_template(
     format!(
         "<img data-lume-id=\"{}\" src=\"{}\" alt=\"{}\">",
         id, src, alt
+    )
+}
+
+fn render_mandelbrot_set_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let id = node_id(ctx);
+    let width = attr_value(element, "width")
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "640".into());
+    let height = attr_value(element, "height")
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "360".into());
+    let center_x = attr_value(element, "centerX")
+        .or_else(|| attr_value(element, "center_x"))
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "-0.743643887".into());
+    let center_y = attr_value(element, "centerY")
+        .or_else(|| attr_value(element, "center_y"))
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "0.131825904".into());
+    let scale = attr_value(element, "scale")
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "85".into());
+    let max_iterations = attr_value(element, "maxIterations")
+        .or_else(|| attr_value(element, "max_iterations"))
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "220".into());
+    format!(
+        "<canvas data-lume-id=\"{}\" data-lume-native-module=\"renderkit\" data-lume-native-symbol=\"mandelbrot_render\" data-lume-native-args=\"width,height,maxIterations,centerX,centerY,scale\" width=\"{}\" height=\"{}\" data-width=\"{}\" data-height=\"{}\" data-center-x=\"{}\" data-center-y=\"{}\" data-scale=\"{}\" data-max-iterations=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>",
+        id, width, height, width, height, center_x, center_y, scale, max_iterations
     )
 }
 
@@ -784,6 +858,9 @@ fn node_has_dynamic(node: &ViewNode, program: &LumeProgram) -> bool {
                     ComponentItem::View(view) => view_has_dynamic(view, program),
                     _ => false,
                 });
+            }
+            if element.name == "MandelbrotSet" {
+                return true;
             }
             element
                 .children

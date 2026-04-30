@@ -116,6 +116,10 @@ pub struct FfiModuleDecl {
     pub library: Option<String>,
     pub header: Option<String>,
     pub sources: Vec<String>,
+    pub runtime: Vec<String>,
+    pub safety: Option<String>,
+    pub thread_safe: Option<bool>,
+    pub lock: Option<String>,
     pub functions: Vec<FfiFunctionDecl>,
     pub span: Span,
 }
@@ -126,6 +130,8 @@ pub struct FfiFunctionDecl {
     pub params: Vec<Param>,
     pub return_ty: String,
     pub ownership: Option<String>,
+    pub free: Option<String>,
+    pub throws: Option<String>,
     pub callback: bool,
     pub span: Span,
 }

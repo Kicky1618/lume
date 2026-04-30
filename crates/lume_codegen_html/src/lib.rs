@@ -162,11 +162,49 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "Button" => render_button(element, ctx),
         "Input" => render_input(element, ctx),
         "Image" => render_image(element, ctx),
+        "MandelbrotSet" => render_mandelbrot_set(element, ctx),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
         "Form" => render_form(element, ctx, program),
         "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
         _ => render_container(element, ctx, program),
     }
+}
+
+fn render_mandelbrot_set(element: &ElementNode, ctx: &mut Ctx) -> String {
+    let id = node_id(ctx);
+    let width = attr_value(element, "width")
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "640".into());
+    let height = attr_value(element, "height")
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "360".into());
+    let center_x = attr_value(element, "centerX")
+        .or_else(|| attr_value(element, "center_x"))
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "-0.743643887".into());
+    let center_y = attr_value(element, "centerY")
+        .or_else(|| attr_value(element, "center_y"))
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "0.131825904".into());
+    let scale = attr_value(element, "scale")
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "85".into());
+    let max_iterations = attr_value(element, "maxIterations")
+        .or_else(|| attr_value(element, "max_iterations"))
+        .map(|expr| eval_expr(expr, ctx).to_attr())
+        .unwrap_or_else(|| "220".into());
+    format!(
+        "<canvas data-lume-id=\"{}\" data-lume-native-module=\"renderkit\" data-lume-native-symbol=\"mandelbrot_render\" data-lume-native-args=\"width,height,maxIterations,centerX,centerY,scale\" width=\"{}\" height=\"{}\" data-width=\"{}\" data-height=\"{}\" data-center-x=\"{}\" data-center-y=\"{}\" data-scale=\"{}\" data-max-iterations=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>\n",
+        id,
+        escape_attr(&width),
+        escape_attr(&height),
+        escape_attr(&width),
+        escape_attr(&height),
+        escape_attr(&center_x),
+        escape_attr(&center_y),
+        escape_attr(&scale),
+        escape_attr(&max_iterations)
+    )
 }
 
 fn render_component(

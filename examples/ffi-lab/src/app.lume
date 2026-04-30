@@ -1,0 +1,232 @@
+ffi struct Vec2 {
+  x: f32,
+  y: f32
+}
+
+ffi struct Rgba {
+  r: u8,
+  g: u8,
+  b: u8,
+  a: u8
+}
+
+ffi enum ImageFormat repr="i32" {
+  png
+  jpeg
+  webp
+}
+
+ffi opaque Canvas ownership borrowed lifetime "frame"
+
+ffi opaque Decoder ownership owned lifetime "request"
+
+ffi module renderkit {
+  language "c"
+  library "./native/librenderkit.so"
+  header "./native/renderkit.h"
+  sources ["./native/renderkit.c"]
+
+  fn canvas_create(size: Vec2): Owned<Handle<Canvas>> free=canvas_destroy
+  fn canvas_destroy(canvas: Handle<Canvas>): Void
+
+  fn decoder_new(bytes: Borrowed<Bytes>): Owned<Handle<Decoder>> free=decoder_free
+  fn decoder_free(decoder: Handle<Decoder>): Void
+
+  fn decode(bytes: Borrowed<Bytes>): Owned<Bytes> free=bytes_free throws last_error
+  fn bytes_free(bytes: Ptr<u8>): Void
+
+  fn render(
+    canvas: Handle<Canvas>,
+    image: Handle<Decoder>,
+    format: ImageFormat
+  ): Owned<Bytes> free=bytes_free
+
+  fn mandelbrot_render(
+    width: i32,
+    height: i32,
+    max_iterations: i32,
+    center_x: f64,
+    center_y: f64,
+    scale: f64
+  ): Owned<Bytes> free=bytes_free throws status
+
+  fn onProgress(current: u64, total: u64): Void callback
+}
+
+server action estimateBudget(width: i64, height: i64): i64 runtime "jit" {
+  return width * height / 8 + 128
+}
+
+server action prepareRender(prompt: String, width: i64, height: i64): String csrf true invalidates ["ffi-lab", prompt] rateLimit "20/min" transaction write {
+  return prompt + " | " + width + "x" + height + " ready"
+}
+
+component App {
+  state prompt: String = "A quiet render pipeline"
+  state width: i64 = 1280
+  state height: i64 = 720
+  state format: String = "png"
+  state quality: i64 = 92
+  state centerX: f64 = -0.743643887
+  state centerY: f64 = 0.131825904
+  state scale: f64 = 85.0
+  state maxIterations: i64 = 220
+  state status: String = "idle"
+  state budget: i64 = 0
+  state manifestNote: String = "MandelbrotSet is drawn in the UI and mirrored by the native FFI function mandelbrot_render."
+  state result: String = ""
+
+  view {
+    Column gap=16 padding=20 {
+      Text("FFI Lab")
+      Text("A working console for FFI declarations, native action planning, and JIT math.")
+
+      Row gap=16 {
+        Box padding=16 {
+          Column gap=10 {
+            Text("Render request")
+
+            Input(value=prompt, label="Prompt", placeholder="Describe the frame") {
+              on input(value) {
+                prompt = value
+              }
+            }
+
+            Input(value=format, label="Format", placeholder="png / jpeg / webp") {
+              on input(value) {
+                format = value
+              }
+            }
+
+            Row gap=8 {
+              Button("- Width") {
+                on click {
+                  width -= 64
+                }
+              }
+
+              Button("+ Width") {
+                on click {
+                  width += 64
+                }
+              }
+            }
+
+            Row gap=8 {
+              Button("- Height") {
+                on click {
+                  height -= 36
+                }
+              }
+
+              Button("+ Height") {
+                on click {
+                  height += 36
+                }
+              }
+            }
+
+            Row gap=8 {
+              Button("- Quality") {
+                on click {
+                  quality -= 1
+                }
+              }
+
+              Button("+ Quality") {
+                on click {
+                  quality += 1
+                }
+              }
+            }
+
+            Row gap=8 {
+              Button("Zoom out") {
+                on click {
+                  scale = scale / 1.6
+                }
+              }
+
+              Button("Zoom in") {
+                on click {
+                  scale = scale * 1.6
+                }
+              }
+            }
+
+            Row gap=8 {
+              Button("- Iterations") {
+                on click {
+                  maxIterations -= 20
+                }
+              }
+
+              Button("+ Iterations") {
+                on click {
+                  maxIterations += 20
+                }
+              }
+            }
+
+            Button("Estimate budget") {
+              on click {
+                budget = await estimateBudget(width, height)
+              }
+            }
+
+            Button("Prepare native job") {
+              on click {
+                result = await prepareRender(prompt, width, height)
+                status = result
+              }
+            }
+          }
+        }
+
+        Box padding=16 {
+          Column gap=10 {
+            Text("FFI inventory")
+            Text("structs: Vec2, Rgba")
+            Text("enum: ImageFormat")
+            Text("opaques: Canvas, Decoder")
+            Text("module: renderkit")
+            Text("native symbol: mandelbrot_render")
+            Text("callback: onProgress")
+            Text("ownership: borrowed / owned / lifetime")
+            Text("backend: native bridge + manifest")
+          }
+        }
+      }
+
+      MandelbrotSet(
+        width=width,
+        height=height,
+        centerX=centerX,
+        centerY=centerY,
+        scale=scale,
+        maxIterations=maxIterations
+      )
+
+      Box padding=16 {
+        Column gap=10 {
+          Text("Execution state")
+          Text("Prompt: {prompt}")
+          Text("Canvas: {width} x {height}")
+          Text("Format: {format}")
+          Text("Quality: {quality}")
+          Text("Mandelbrot center: {centerX}, {centerY}")
+          Text("Mandelbrot scale: {scale}")
+          Text("Mandelbrot iterations: {maxIterations}")
+          Text("Budget: {budget}")
+          Text("Status: {status}")
+          Text("{manifestNote}")
+          if result != "" {
+            Text("Last result: {result}")
+          } else {
+            Text("Last result: none")
+          }
+        }
+      }
+    }
+  }
+}

@@ -21,3 +21,4 @@ Examples:
 - `server-actions`: interpreted Server Actions, typed arguments, arrays, comparisons, and generated client stubs.
 - `server-actions-jit`: numeric `runtime "jit"` Server Action compiled through the LLVM backend when available.
 - `server-actions-metadata`: action modifiers such as `auth`, `csrf`, `invalidates`, `maxBodySize`, `rateLimit`, and `transaction` in the manifest.
+- `ffi-lab`: FFI modules, structs, enums, opaques, callbacks, ownership, `free`, `throws`, and native bridge planning in one operational console.

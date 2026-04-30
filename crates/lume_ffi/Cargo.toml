@@ -3,5 +3,12 @@ name = "lume_ffi"
 version.workspace = true
 edition.workspace = true
 
+[features]
+default = ["ast"]
+ast = ["dep:lume_ast"]
+
+[dependencies]
+lume_ast = { path = "../lume_ast", optional = true }
+
 [lib]
 path = "src/lib.rs"

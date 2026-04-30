@@ -282,12 +282,21 @@ fn enforce_action_guards(
     Ok(())
 }
 
-fn validate_action_rules(action: &ServerActionDecl, args: &[ActionValue]) -> Result<(), ActionError> {
-    if !action.modifiers.iter().any(|modifier| modifier.name == "validate") {
+fn validate_action_rules(
+    action: &ServerActionDecl,
+    args: &[ActionValue],
+) -> Result<(), ActionError> {
+    if !action
+        .modifiers
+        .iter()
+        .any(|modifier| modifier.name == "validate")
+    {
         return Ok(());
     }
     for (param, value) in action.params.iter().zip(args) {
-        if matches!(value, ActionValue::Null) || matches!(value, ActionValue::String(text) if text.trim().is_empty()) {
+        if matches!(value, ActionValue::Null)
+            || matches!(value, ActionValue::String(text) if text.trim().is_empty())
+        {
             return Err(ActionError {
                 status: 400,
                 message: format!(

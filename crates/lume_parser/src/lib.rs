@@ -89,6 +89,18 @@ impl Parser {
             return Some(Decl::Form(self.reserved_named("form")));
         }
         if self.eat_keyword("ffi") {
+            if self.eat_keyword("module") {
+                return self.ffi_module_decl().map(Decl::FfiModule);
+            }
+            if self.eat_keyword("struct") {
+                return self.ffi_struct_decl().map(Decl::FfiStruct);
+            }
+            if self.eat_keyword("enum") {
+                return self.ffi_enum_decl().map(Decl::FfiEnum);
+            }
+            if self.eat_keyword("opaque") {
+                return self.ffi_opaque_decl().map(Decl::FfiOpaque);
+            }
             self.expect_keyword("module");
             return self.ffi_module_decl().map(Decl::FfiModule);
         }
@@ -289,7 +301,15 @@ impl Parser {
         };
         self.expect_operator("=");
         let source = self.expr_until(&[
-            "}", "query", "server", "component", "page", "route", "style", "theme", "ffi",
+            "}",
+            "query",
+            "server",
+            "component",
+            "page",
+            "route",
+            "style",
+            "theme",
+            "ffi",
         ]);
         Some(QueryDecl {
             name,
@@ -303,9 +323,16 @@ impl Parser {
     fn ffi_module_decl(&mut self) -> Option<FfiModuleDecl> {
         let start = self.previous().span.start;
         let name = self.ident_or_keyword()?;
+        let mut safety = None;
+        if self.eat_identish("safe") {
+            safety = Some("safe".into());
+        } else if self.eat_identish("unsafe") {
+            safety = Some("unsafe".into());
+        }
         self.expect_symbol('{');
         let mut module = FfiModuleDecl {
             name,
+            safety,
             span: Span::new(start, start),
             ..Default::default()
         };
@@ -320,6 +347,11 @@ impl Parser {
                 "library" => module.library = Some(self.string_or_raw_atom()),
                 "header" => module.header = Some(self.string_or_raw_atom()),
                 "sources" => module.sources = self.string_list_or_atom(),
+                "runtime" => module.runtime = self.string_list_or_atom(),
+                "safe" => module.safety = Some("safe".into()),
+                "unsafe" => module.safety = Some("unsafe".into()),
+                "threadSafe" | "thread_safe" => module.thread_safe = Some(self.bool_atom()),
+                "lock" => module.lock = Some(self.string_or_raw_atom()),
                 "fn" => {
                     if let Some(function) = self.ffi_function_decl(item_start) {
                         module.functions.push(function);
@@ -346,12 +378,22 @@ impl Parser {
             Vec::new()
         };
         self.expect_symbol(':');
-        let return_ty = self.collect_raw_until(&["}", "fn", "ownership", "callback"]);
+        let return_ty = self.collect_raw_until(&[
+            "}", "fn", "ownership", "free", "throws", "callback",
+        ]);
         let mut ownership = None;
+        let mut free = None;
+        let mut throws = None;
         let mut callback = false;
         while !self.at_eof() && !self.check_symbol('}') && !self.check_identish("fn") {
             if self.eat_identish("ownership") {
                 ownership = Some(self.string_or_raw_atom());
+            } else if self.eat_identish("free") {
+                self.eat_operator("=");
+                free = Some(self.string_or_raw_atom());
+            } else if self.eat_identish("throws") {
+                self.eat_operator("=");
+                throws = Some(self.string_or_raw_atom());
             } else if self.eat_identish("callback") {
                 callback = true;
             } else {
@@ -363,6 +405,8 @@ impl Parser {
             params,
             return_ty: return_ty.trim().to_string(),
             ownership,
+            free,
+            throws,
             callback,
             span: Span::new(start, self.previous().span.end),
         })
@@ -373,6 +417,7 @@ impl Parser {
         let name = self.ident_or_keyword()?;
         let mut repr = None;
         if self.eat_identish("repr") {
+            self.eat_operator("=");
             repr = Some(self.string_or_raw_atom());
         }
         self.expect_symbol('{');
@@ -406,6 +451,7 @@ impl Parser {
         let name = self.ident_or_keyword()?;
         let mut repr = None;
         if self.eat_identish("repr") {
+            self.eat_operator("=");
             repr = Some(self.string_or_raw_atom());
         }
         self.expect_symbol('{');
@@ -460,7 +506,7 @@ impl Parser {
                 break;
             };
             self.expect_symbol(':');
-            let ty = self.ident_or_keyword().unwrap_or_else(|| "Unknown".into());
+            let ty = self.collect_raw_until(&["=", ",", ")"]);
             let default = if self.eat_operator("=") {
                 Some(self.expr_until(&[",", ")"]))
             } else {
@@ -945,6 +991,14 @@ impl Parser {
         values
     }
 
+    fn bool_atom(&mut self) -> bool {
+        match self.string_or_raw_atom().as_str() {
+            "true" => true,
+            "false" => false,
+            _ => true,
+        }
+    }
+
     fn expr_until(&mut self, stops: &[&str]) -> Expr {
         let start = self.current().span.start;
         let raw = self.collect_raw_until(stops);
@@ -979,6 +1033,13 @@ impl Parser {
             if depth == 0 && self.is_stop(stops) {
                 break;
             }
+            if depth == 0
+                && !raw.is_empty()
+                && self.current().line_break_before
+                && self.starts_new_statement()
+            {
+                break;
+            }
             match &self.current().kind {
                 TokenKind::Symbol('(') | TokenKind::Symbol('[') => depth += 1,
                 TokenKind::Symbol(')') | TokenKind::Symbol(']') => depth = depth.saturating_sub(1),
@@ -991,6 +1052,24 @@ impl Parser {
             self.advance();
         }
         raw
+    }
+
+    fn starts_new_statement(&self) -> bool {
+        if !matches!(
+            self.current().kind,
+            TokenKind::Ident(_) | TokenKind::Keyword(_)
+        ) {
+            return false;
+        }
+        !matches!(
+            &self.previous().kind,
+            TokenKind::Operator(_)
+                | TokenKind::Symbol('(')
+                | TokenKind::Symbol('[')
+                | TokenKind::Symbol('{')
+                | TokenKind::Symbol(',')
+                | TokenKind::Symbol('.')
+        ) && !matches!(&self.previous().kind, TokenKind::Keyword(keyword) if keyword == "await")
     }
 
     fn skip_balanced_block(&mut self) {
@@ -1305,6 +1384,60 @@ component App {
     }
 
     #[test]
+    fn parses_newline_separated_statements_after_await() {
+        let source = r#"
+component App {
+  state result: String = ""
+  state status: String = ""
+
+  view {
+    Button("Run") {
+      on click {
+        result = await prepareRender(prompt, width, height)
+        status = result
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let Decl::Component(component) = &program.declarations[0] else {
+            panic!("expected component");
+        };
+        let view = component.items.iter().find_map(|item| match item {
+            ComponentItem::View(view) => Some(view),
+            _ => None,
+        });
+        let Some(view) = view else {
+            panic!("expected view");
+        };
+        let ViewNode::Element(button) = &view.nodes[0] else {
+            panic!("expected button");
+        };
+        let Some(children) = &button.children else {
+            panic!("expected button children");
+        };
+        let ViewNode::Event(event) = &children.nodes[0] else {
+            panic!("expected click event");
+        };
+        assert_eq!(
+            event.body.statements.len(),
+            2,
+            "parsed statements: {:?}",
+            event.body.statements
+        );
+        assert!(matches!(
+            event.body.statements[0],
+            lume_ast::Stmt::Assign { ref target, .. } if target == "result"
+        ));
+        assert!(matches!(
+            event.body.statements[1],
+            lume_ast::Stmt::Assign { ref target, .. } if target == "status"
+        ));
+    }
+
+    #[test]
     fn parses_server_action_decl() {
         let source = r#"
 server action add(a: i64, b: i64): i64 runtime native auth required csrf false {
@@ -1338,6 +1471,45 @@ component App {
             .modifiers
             .iter()
             .any(|modifier| modifier.name == "csrf" && modifier.value.as_deref() == Some("false")));
+    }
+
+    #[test]
+    fn parses_ffi_decl_modifiers() {
+        let source = r#"
+ffi module renderkit unsafe {
+  language "c"
+  library "./native/librenderkit.so"
+  runtime ["native", "jit"]
+  threadSafe false
+  lock "renderkit"
+
+  fn decode(bytes: Borrowed<Bytes>): Owned<Bytes> free=bytes_free throws last_error
+  fn onProgress(current: u64, total: u64): Void callback
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let Decl::FfiModule(module) = &program.declarations[0] else {
+            panic!("expected ffi module");
+        };
+        assert_eq!(module.safety.as_deref(), Some("unsafe"));
+        assert_eq!(module.runtime, vec!["native", "jit"]);
+        assert_eq!(module.thread_safe, Some(false));
+        assert_eq!(module.lock.as_deref(), Some("renderkit"));
+        assert_eq!(module.functions[0].return_ty, "Owned<Bytes>");
+        assert_eq!(module.functions[0].free.as_deref(), Some("bytes_free"));
+        assert_eq!(module.functions[0].throws.as_deref(), Some("last_error"));
+        assert!(module.functions[1].callback);
     }
 
     #[test]

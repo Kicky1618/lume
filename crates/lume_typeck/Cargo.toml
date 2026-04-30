@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 lume_ast = { path = "../lume_ast" }
 lume_diagnostics = { path = "../lume_diagnostics" }
+lume_ffi = { path = "../lume_ffi" }
 lume_hir = { path = "../lume_hir" }
 
 [dev-dependencies]
