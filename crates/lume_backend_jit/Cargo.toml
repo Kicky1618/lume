@@ -3,5 +3,9 @@ name = "lume_backend_jit"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+lume_ast = { path = "../lume_ast" }
+lume_codegen_llvm = { path = "../lume_codegen_llvm" }
+
 [lib]
 path = "src/lib.rs"

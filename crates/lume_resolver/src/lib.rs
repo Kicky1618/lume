@@ -168,10 +168,15 @@ fn exported_name(decl: &Decl) -> Option<String> {
         Decl::Theme(theme) => Some(theme.name.clone()),
         Decl::Type(decl)
         | Decl::App(decl)
-        | Decl::ServerAction(decl)
         | Decl::Form(decl)
         | Decl::Ffi(decl)
         | Decl::Reserved(decl) => decl.name.clone(),
+        Decl::Query(decl) => Some(decl.name.clone()),
+        Decl::FfiModule(decl) => Some(decl.name.clone()),
+        Decl::FfiStruct(decl) => Some(decl.name.clone()),
+        Decl::FfiEnum(decl) => Some(decl.name.clone()),
+        Decl::FfiOpaque(decl) => Some(decl.name.clone()),
+        Decl::ServerAction(decl) => Some(decl.name.clone()),
         _ => None,
     }
 }

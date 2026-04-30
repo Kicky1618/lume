@@ -1,0 +1,23 @@
+server action multiplyAdd(a: i64, b: i64, c: i64): i64 runtime "jit" {
+  return a * b + c
+}
+
+component App {
+  state left: i64 = 6
+  state right: i64 = 7
+  state extra: i64 = 2
+  state result: i64 = 0
+
+  view {
+    Column gap=12 padding=16 {
+      Text("LLVM JIT Server Action")
+      Text("{left} * {right} + {extra} = {result}")
+
+      Button("Run on server") {
+        on click {
+          result = await multiplyAdd(left, right, extra)
+        }
+      }
+    }
+  }
+}

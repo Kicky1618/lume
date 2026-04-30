@@ -7,7 +7,7 @@ impl WasmBackend {
     }
 
     pub fn emit_skeleton(&self) -> &'static [u8] {
-        b""
+        b"\0asm\x01\0\0\0"
     }
 }
 
@@ -16,7 +16,7 @@ mod tests {
     use super::WasmBackend;
 
     #[test]
-    fn skeleton_emits_empty_placeholder() {
-        assert_eq!(WasmBackend::new().emit_skeleton(), b"");
+    fn skeleton_emits_valid_header_placeholder() {
+        assert_eq!(WasmBackend::new().emit_skeleton(), b"\0asm\x01\0\0\0");
     }
 }

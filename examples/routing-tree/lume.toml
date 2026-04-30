@@ -1,0 +1,4 @@
+[project]
+name = "routing-tree"
+entry = "src/app.lume"
+out_dir = "dist"

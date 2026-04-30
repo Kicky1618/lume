@@ -17,3 +17,7 @@ Examples:
 - `scoreboard`: multiple counters and conditional text.
 - `form-state`: small form-like state preview.
 - `composed-card`: local `.lume` import with exported component and style.
+- `routing-tree`: nested routes, `index`, `layout`, `guard`, `:id`, and `*path` in one route manifest.
+- `server-actions`: interpreted Server Actions, typed arguments, arrays, comparisons, and generated client stubs.
+- `server-actions-jit`: numeric `runtime "jit"` Server Action compiled through the LLVM backend when available.
+- `server-actions-metadata`: action modifiers such as `auth`, `csrf`, `invalidates`, `maxBodySize`, `rateLimit`, and `transaction` in the manifest.

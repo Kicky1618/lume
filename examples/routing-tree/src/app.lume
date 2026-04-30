@@ -1,0 +1,78 @@
+layout ShellLayout {
+  view {
+    Column gap=12 padding=16 {
+      Text("Routing tree demo")
+      Outlet()
+    }
+  }
+}
+
+component HomePage {
+  view {
+    Box padding=12 {
+      Text("Home page")
+    }
+  }
+}
+
+component UsersIndex {
+  view {
+    Box padding=12 {
+      Text("Users index")
+    }
+  }
+}
+
+component UserDetail(id: String) {
+  view {
+    Box padding=12 {
+      Text("User detail: {id}")
+    }
+  }
+}
+
+component DocsPage(path: String) {
+  view {
+    Box padding=12 {
+      Text("Docs path: {path}")
+    }
+  }
+}
+
+component LoginPage {
+  view {
+    Box padding=12 {
+      Text("Login required")
+    }
+  }
+}
+
+route "/" layout=ShellLayout {
+  index {
+    HomePage()
+  }
+
+  route "users" guard=requireLogin {
+    index {
+      UsersIndex()
+    }
+
+    route "login" {
+      LoginPage()
+    }
+
+    route ":id<String>" {
+      UserDetail(id=params.id)
+    }
+
+    route "*path" {
+      DocsPage(path=params.path)
+    }
+  }
+}
+
+component App {
+  view {
+    ShellLayout()
+  }
+}

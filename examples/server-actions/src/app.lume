@@ -1,0 +1,61 @@
+server action add(a: i64, b: i64): i64 runtime "jit" csrf true {
+  return a + b
+}
+
+server action saveMessage(message: String): String invalidates savedMessage maxBodySize 256 {
+  message = message + " (saved)";
+  return message
+}
+
+server action summarize(count: i64, message: String): Array {
+  count += 1;
+  return [count, message, count >= 3]
+}
+
+component App {
+  state count: i64 = 1
+  state message: String = "Draft"
+  state saved: String = ""
+  state summary: Array = []
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Server Actions demo")
+      Text("Count: {count}")
+
+      Button("Add on server") {
+        on click {
+          count = await add(count, 5)
+        }
+      }
+
+      Input(value=message, label="Message", placeholder="Write a message") {
+        on input(value) {
+          message = value
+        }
+      }
+
+      Button("Save message") {
+        on click {
+          saved = await saveMessage(message)
+        }
+      }
+
+      Button("Summarize") {
+        on click {
+          summary = await summarize(count, message)
+        }
+      }
+
+      if saved != "" {
+        Box padding=16 {
+          Text("Saved: {saved}")
+        }
+      } else {
+        Text("Nothing saved yet.")
+      }
+
+      Text("Summary: {summary}")
+    }
+  }
+}

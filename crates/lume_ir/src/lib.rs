@@ -11,7 +11,56 @@ pub struct LumeProgram {
     pub components: Vec<ComponentDecl>,
     pub styles: Vec<StyleDecl>,
     pub themes: Vec<ThemeDecl>,
-    pub routes: Vec<RouteDecl>,
+    pub routes: Vec<IrRoute>,
+    pub route_tree: Vec<IrRouteNode>,
+    pub server_actions: Vec<ServerActionDecl>,
+    pub queries: Vec<QueryDecl>,
+    pub ffi_modules: Vec<FfiModuleDecl>,
+    pub ffi_structs: Vec<FfiStructDecl>,
+    pub ffi_enums: Vec<FfiEnumDecl>,
+    pub ffi_opaques: Vec<FfiOpaqueDecl>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IrRouteNode {
+    pub route: IrRoute,
+    pub children: Vec<IrRouteNode>,
+}
+
+#[derive(Clone, Debug)]
+pub struct IrRoute {
+    pub id: String,
+    pub path: String,
+    pub source_path: String,
+    pub segments: Vec<RouteSegment>,
+    pub params: Vec<RouteParam>,
+    pub layout: Option<String>,
+    pub guards: Vec<String>,
+    pub page: Option<String>,
+    pub view: Option<ViewBlock>,
+    pub is_index: bool,
+    pub matcher_rank: Vec<u8>,
+    pub span: lume_span::Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RouteSegment {
+    Static(String),
+    Dynamic { name: String, ty: Option<String> },
+    CatchAll { name: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteParam {
+    pub name: String,
+    pub ty: String,
+    pub catch_all: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct RouteMatch<'a> {
+    pub route: &'a IrRoute,
+    pub params: HashMap<String, String>,
 }
 
 pub fn build(program: &HirProgram) -> Result<LumeProgram, Diagnostics> {
@@ -34,9 +83,40 @@ pub fn build_with_base(
         .filter_map(theme_decl)
         .cloned()
         .collect::<Vec<_>>();
-    let routes = declarations
+    let route_decls = declarations
         .iter()
         .filter_map(route_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let (route_tree, routes) = lower_routes(&route_decls, &mut diagnostics);
+    let server_actions = declarations
+        .iter()
+        .filter_map(server_action_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let queries = declarations
+        .iter()
+        .filter_map(query_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ffi_modules = declarations
+        .iter()
+        .filter_map(ffi_module_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ffi_structs = declarations
+        .iter()
+        .filter_map(ffi_struct_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ffi_enums = declarations
+        .iter()
+        .filter_map(ffi_enum_decl)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ffi_opaques = declarations
+        .iter()
+        .filter_map(ffi_opaque_decl)
         .cloned()
         .collect::<Vec<_>>();
     let components = declarations
@@ -45,6 +125,9 @@ pub fn build_with_base(
         .cloned()
         .collect::<Vec<_>>();
 
+    if diagnostics.has_errors() {
+        return Err(diagnostics);
+    }
     if let Some(component) = entry_component(program) {
         return Ok(LumeProgram {
             component: component.clone(),
@@ -52,6 +135,13 @@ pub fn build_with_base(
             styles,
             themes,
             routes,
+            route_tree,
+            server_actions,
+            queries,
+            ffi_modules,
+            ffi_structs,
+            ffi_enums,
+            ffi_opaques,
         });
     }
     diagnostics.push(Diagnostic::error(
@@ -137,10 +227,15 @@ fn exported_name(decl: &Decl) -> Option<&str> {
         Decl::Theme(theme) => Some(&theme.name),
         Decl::Type(decl)
         | Decl::App(decl)
-        | Decl::ServerAction(decl)
         | Decl::Form(decl)
         | Decl::Ffi(decl)
         | Decl::Reserved(decl) => decl.name.as_deref(),
+        Decl::Query(decl) => Some(&decl.name),
+        Decl::FfiModule(decl) => Some(&decl.name),
+        Decl::FfiStruct(decl) => Some(&decl.name),
+        Decl::FfiEnum(decl) => Some(&decl.name),
+        Decl::FfiOpaque(decl) => Some(&decl.name),
+        Decl::ServerAction(decl) => Some(&decl.name),
         _ => None,
     }
 }
@@ -172,6 +267,374 @@ fn route_decl(decl: &Decl) -> Option<&RouteDecl> {
     match decl {
         Decl::Route(route) => Some(route),
         _ => None,
+    }
+}
+
+fn server_action_decl(decl: &Decl) -> Option<&ServerActionDecl> {
+    match decl {
+        Decl::ServerAction(action) => Some(action),
+        _ => None,
+    }
+}
+
+fn query_decl(decl: &Decl) -> Option<&QueryDecl> {
+    match decl {
+        Decl::Query(query) => Some(query),
+        _ => None,
+    }
+}
+
+fn ffi_module_decl(decl: &Decl) -> Option<&FfiModuleDecl> {
+    match decl {
+        Decl::FfiModule(module) => Some(module),
+        _ => None,
+    }
+}
+
+fn ffi_struct_decl(decl: &Decl) -> Option<&FfiStructDecl> {
+    match decl {
+        Decl::FfiStruct(item) => Some(item),
+        _ => None,
+    }
+}
+
+fn ffi_enum_decl(decl: &Decl) -> Option<&FfiEnumDecl> {
+    match decl {
+        Decl::FfiEnum(item) => Some(item),
+        _ => None,
+    }
+}
+
+fn ffi_opaque_decl(decl: &Decl) -> Option<&FfiOpaqueDecl> {
+    match decl {
+        Decl::FfiOpaque(item) => Some(item),
+        _ => None,
+    }
+}
+
+fn lower_routes(
+    route_decls: &[RouteDecl],
+    diagnostics: &mut Diagnostics,
+) -> (Vec<IrRouteNode>, Vec<IrRoute>) {
+    let mut seen = HashSet::new();
+    let mut flat = Vec::new();
+    let mut tree = Vec::new();
+    for decl in route_decls {
+        let node = lower_route_node(
+            decl,
+            None,
+            None,
+            &[],
+            false,
+            diagnostics,
+            &mut seen,
+            &mut flat,
+        );
+        tree.push(node);
+    }
+    flat.sort_by(compare_routes);
+    (tree, flat)
+}
+
+fn lower_route_node(
+    decl: &RouteDecl,
+    parent_path: Option<&str>,
+    inherited_layout: Option<String>,
+    inherited_guards: &[String],
+    nested: bool,
+    diagnostics: &mut Diagnostics,
+    seen: &mut HashSet<String>,
+    flat: &mut Vec<IrRoute>,
+) -> IrRouteNode {
+    if nested && decl.path.starts_with('/') {
+        diagnostics.push(Diagnostic::error(
+            "LUME7008",
+            "nested route path must be relative",
+            Some(decl.span),
+        ));
+    }
+
+    let full_path = join_route_path(parent_path, &decl.path);
+    let layout = route_layout(decl).or(inherited_layout);
+    let mut guards = inherited_guards.to_vec();
+    guards.extend(route_guards(decl));
+    let view = (!decl.body.view_nodes.is_empty()).then_some(ViewBlock {
+        nodes: decl.body.view_nodes.clone(),
+        span: decl.body.span,
+    });
+    let mut route = make_ir_route(
+        decl,
+        full_path.clone(),
+        layout.clone(),
+        guards.clone(),
+        view.as_ref(),
+        false,
+        diagnostics,
+    );
+    if !seen.insert(route.path.clone()) {
+        diagnostics.push(Diagnostic::error(
+            "LUME7001",
+            format!("duplicate route pattern `{}`", route.path),
+            Some(decl.span),
+        ));
+    }
+    flat.push(route.clone());
+
+    let mut children = Vec::new();
+    if let Some(index) = &decl.body.index {
+        let index_route = make_ir_route(
+            decl,
+            full_path.clone(),
+            layout.clone(),
+            guards.clone(),
+            Some(index),
+            true,
+            diagnostics,
+        );
+        children.push(IrRouteNode {
+            route: index_route.clone(),
+            children: Vec::new(),
+        });
+        flat.push(index_route);
+    }
+    for child in &decl.body.children {
+        children.push(lower_route_node(
+            child,
+            Some(&full_path),
+            layout.clone(),
+            &guards,
+            true,
+            diagnostics,
+            seen,
+            flat,
+        ));
+    }
+    route.page = page_from_view(view.as_ref());
+    IrRouteNode { route, children }
+}
+
+fn make_ir_route(
+    decl: &RouteDecl,
+    path: String,
+    layout: Option<String>,
+    guards: Vec<String>,
+    view: Option<&ViewBlock>,
+    is_index: bool,
+    diagnostics: &mut Diagnostics,
+) -> IrRoute {
+    let segments = parse_route_segments(&path, decl.span, diagnostics);
+    let params = route_params(&segments);
+    IrRoute {
+        id: route_id(&path, is_index),
+        path: path.clone(),
+        source_path: decl.path.clone(),
+        matcher_rank: segments.iter().map(segment_rank).collect(),
+        segments,
+        params,
+        layout,
+        guards,
+        page: page_from_view(view),
+        view: view.cloned(),
+        is_index,
+        span: decl.span,
+    }
+}
+
+fn route_layout(decl: &RouteDecl) -> Option<String> {
+    decl.attrs.iter().find_map(|attr| match attr {
+        RouteAttr::Layout { name, .. } => Some(name.clone()),
+        _ => None,
+    })
+}
+
+fn route_guards(decl: &RouteDecl) -> Vec<String> {
+    decl.attrs
+        .iter()
+        .filter_map(|attr| match attr {
+            RouteAttr::Guard { expr, .. } => Some(expr.raw.clone()),
+            _ => None,
+        })
+        .filter(|guard| !guard.is_empty())
+        .collect()
+}
+
+fn page_from_view(view: Option<&ViewBlock>) -> Option<String> {
+    view.and_then(|view| {
+        view.nodes.iter().find_map(|node| match node {
+            ViewNode::Element(element) => Some(element.name.clone()),
+            _ => None,
+        })
+    })
+}
+
+fn join_route_path(parent: Option<&str>, child: &str) -> String {
+    let child = child.trim();
+    if parent.is_none() || child.starts_with('/') {
+        return normalize_route_path(child);
+    }
+    let parent = parent.unwrap_or("/");
+    if child.is_empty() || child == "." {
+        return normalize_route_path(parent);
+    }
+    normalize_route_path(&format!("{}/{}", parent.trim_end_matches('/'), child))
+}
+
+fn normalize_route_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return "/".into();
+    }
+    let without_trailing = trimmed.trim_end_matches('/');
+    if without_trailing.starts_with('/') {
+        without_trailing.into()
+    } else {
+        format!("/{without_trailing}")
+    }
+}
+
+fn parse_route_segments(
+    path: &str,
+    span: lume_span::Span,
+    diagnostics: &mut Diagnostics,
+) -> Vec<RouteSegment> {
+    let mut segments = Vec::new();
+    if path == "/" {
+        return segments;
+    }
+    for (index, raw) in path.trim_matches('/').split('/').enumerate() {
+        if let Some(rest) = raw.strip_prefix(':') {
+            let (name, ty) = parse_dynamic_segment(rest);
+            if name.is_empty() {
+                diagnostics.push(Diagnostic::error(
+                    "LUME1009",
+                    format!("invalid route pattern `{path}`"),
+                    Some(span),
+                ));
+            }
+            segments.push(RouteSegment::Dynamic { name, ty });
+        } else if let Some(name) = raw.strip_prefix('*') {
+            if index + 1 != path.trim_matches('/').split('/').count() {
+                diagnostics.push(Diagnostic::error(
+                    "LUME1009",
+                    "catch-all route segment must be last",
+                    Some(span),
+                ));
+            }
+            segments.push(RouteSegment::CatchAll { name: name.into() });
+        } else {
+            segments.push(RouteSegment::Static(raw.into()));
+        }
+    }
+    segments
+}
+
+fn parse_dynamic_segment(raw: &str) -> (String, Option<String>) {
+    let Some(start) = raw.find('<') else {
+        return (raw.into(), None);
+    };
+    let end = raw.rfind('>').unwrap_or(raw.len());
+    (raw[..start].into(), Some(raw[start + 1..end].into()))
+}
+
+fn route_params(segments: &[RouteSegment]) -> Vec<RouteParam> {
+    segments
+        .iter()
+        .filter_map(|segment| match segment {
+            RouteSegment::Dynamic { name, ty } => Some(RouteParam {
+                name: name.clone(),
+                ty: ty.clone().unwrap_or_else(|| "String".into()),
+                catch_all: false,
+            }),
+            RouteSegment::CatchAll { name } => Some(RouteParam {
+                name: name.clone(),
+                ty: "String[]".into(),
+                catch_all: true,
+            }),
+            RouteSegment::Static(_) => None,
+        })
+        .collect()
+}
+
+fn segment_rank(segment: &RouteSegment) -> u8 {
+    match segment {
+        RouteSegment::Static(_) => 0,
+        RouteSegment::Dynamic { ty: Some(_), .. } => 1,
+        RouteSegment::Dynamic { ty: None, .. } => 2,
+        RouteSegment::CatchAll { .. } => 3,
+    }
+}
+
+fn compare_routes(left: &IrRoute, right: &IrRoute) -> std::cmp::Ordering {
+    left.matcher_rank
+        .cmp(&right.matcher_rank)
+        .then_with(|| right.segments.len().cmp(&left.segments.len()))
+        .then_with(|| right.page.is_some().cmp(&left.page.is_some()))
+        .then_with(|| left.path.cmp(&right.path))
+}
+
+fn route_id(path: &str, is_index: bool) -> String {
+    let mut id = path
+        .trim_matches('/')
+        .replace(['/', ':', '*', '<', '>'], "_")
+        .replace("__", "_");
+    if id.is_empty() {
+        id = "root".into();
+    }
+    if is_index {
+        format!("{id}_index")
+    } else {
+        id
+    }
+}
+
+pub fn match_route<'a>(routes: &'a [IrRoute], path: &str) -> Option<RouteMatch<'a>> {
+    let request = normalize_route_path(path);
+    let request_segments = if request == "/" {
+        Vec::new()
+    } else {
+        request.trim_matches('/').split('/').collect::<Vec<_>>()
+    };
+    let mut sorted = routes.iter().collect::<Vec<_>>();
+    sorted.sort_by(|left, right| compare_routes(left, right));
+    sorted.into_iter().find_map(|route| {
+        match_segments(route, &request_segments).map(|params| RouteMatch { route, params })
+    })
+}
+
+fn match_segments(route: &IrRoute, request_segments: &[&str]) -> Option<HashMap<String, String>> {
+    let mut params = HashMap::new();
+    let mut index = 0usize;
+    for segment in &route.segments {
+        match segment {
+            RouteSegment::Static(value) => {
+                if request_segments.get(index).copied() != Some(value.as_str()) {
+                    return None;
+                }
+                index += 1;
+            }
+            RouteSegment::Dynamic { name, ty } => {
+                let value = request_segments.get(index)?;
+                if !matches_route_type(value, ty.as_deref()) {
+                    return None;
+                }
+                params.insert(name.clone(), (*value).into());
+                index += 1;
+            }
+            RouteSegment::CatchAll { name } => {
+                params.insert(name.clone(), request_segments[index..].join("/"));
+                index = request_segments.len();
+                break;
+            }
+        }
+    }
+    (index == request_segments.len()).then_some(params)
+}
+
+fn matches_route_type(value: &str, ty: Option<&str>) -> bool {
+    match ty.unwrap_or("String") {
+        "i32" | "i64" | "u32" | "u64" | "Int" => value.parse::<i64>().is_ok(),
+        "String" => true,
+        _ => true,
     }
 }
 
@@ -439,7 +902,7 @@ fn is_string_literal(raw: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::build_with_base;
+    use super::{build_with_base, match_route};
     use lume_ast::ViewNode;
     use lume_hir::lower;
     use lume_parser::parse;
@@ -482,6 +945,26 @@ component App {
     }
 
     #[test]
+    fn collects_server_actions() {
+        let source = r#"
+server action add(amount: i64): i64 {
+  return amount
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build_with_base(&lower(program), None).expect("ir");
+        assert_eq!(ir.server_actions.len(), 1);
+        assert_eq!(ir.server_actions[0].name, "add");
+    }
+
+    #[test]
     fn expands_component_props_and_slots() {
         let source = r#"
 component Card(title: String = "Untitled") {
@@ -514,5 +997,72 @@ component App {
         let debug = format!("{expanded:?}");
         assert!(debug.contains("Title: Hello"));
         assert!(debug.contains("Body"));
+    }
+
+    #[test]
+    fn lowers_nested_routes_and_matches_by_priority() {
+        let source = r#"
+layout AppLayout {
+  view {
+    Outlet()
+  }
+}
+
+route "/users" layout=AppLayout guard=requireLogin {
+  index {
+    UsersIndex()
+  }
+
+  route "new" {
+    NewUserPage()
+  }
+
+  route ":id<i64>" {
+    UserPage(id=params.id)
+  }
+
+  route ":slug" {
+    UserSlugPage(slug=params.slug)
+  }
+
+  route "*path" {
+    UsersCatchAll(path=params.path)
+  }
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build_with_base(&lower(program), None).expect("ir");
+        assert_eq!(ir.route_tree.len(), 1);
+        assert_eq!(ir.route_tree[0].children.len(), 5);
+
+        let new_match = match_route(&ir.routes, "/users/new").expect("new match");
+        assert_eq!(new_match.route.page.as_deref(), Some("NewUserPage"));
+
+        let id_match = match_route(&ir.routes, "/users/42").expect("id match");
+        assert_eq!(id_match.route.page.as_deref(), Some("UserPage"));
+        assert_eq!(id_match.params.get("id").map(String::as_str), Some("42"));
+
+        let slug_match = match_route(&ir.routes, "/users/alice").expect("slug match");
+        assert_eq!(slug_match.route.page.as_deref(), Some("UserSlugPage"));
+
+        let catch_all = match_route(&ir.routes, "/users/a/b").expect("catch-all match");
+        assert_eq!(catch_all.route.page.as_deref(), Some("UsersCatchAll"));
+        assert_eq!(
+            catch_all.params.get("path").map(String::as_str),
+            Some("a/b")
+        );
+        assert_eq!(
+            catch_all.route.layout.as_deref(),
+            Some("AppLayout"),
+            "layout should be inherited"
+        );
+        assert_eq!(catch_all.route.guards, vec!["requireLogin"]);
     }
 }

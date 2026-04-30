@@ -7,12 +7,14 @@ edition.workspace = true
 lume_codegen_css = { path = "../lume_codegen_css" }
 lume_codegen_html = { path = "../lume_codegen_html" }
 lume_codegen_js = { path = "../lume_codegen_js" }
+lume_codegen_wasm = { path = "../lume_codegen_wasm" }
 lume_diagnostics = { path = "../lume_diagnostics" }
 lume_formatter = { path = "../lume_formatter" }
 lume_hir = { path = "../lume_hir" }
 lume_ir = { path = "../lume_ir" }
 lume_parser = { path = "../lume_parser" }
 lume_resolver = { path = "../lume_resolver" }
+lume_runtime_server = { path = "../lume_runtime_server" }
 lume_session = { path = "../lume_session" }
 lume_typeck = { path = "../lume_typeck" }
 

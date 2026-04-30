@@ -1,0 +1,4 @@
+[project]
+name = "server-actions-metadata"
+entry = "src/app.lume"
+out_dir = "dist"

@@ -76,18 +76,30 @@ impl Parser {
             return Some(Decl::App(self.reserved_named("app")));
         }
         if self.eat_keyword("server") {
-            self.eat_keyword("action");
-            return Some(Decl::ServerAction(self.reserved_named("server action")));
+            if self.eat_keyword("query") {
+                return self.query_decl(true).map(Decl::Query);
+            }
+            self.expect_keyword("action");
+            return self.server_action_decl().map(Decl::ServerAction);
+        }
+        if self.eat_keyword("query") {
+            return self.query_decl(false).map(Decl::Query);
         }
         if self.eat_keyword("form") {
             return Some(Decl::Form(self.reserved_named("form")));
         }
-        if self.eat_keyword("ffi")
-            || self.eat_keyword("struct")
-            || self.eat_keyword("enum")
-            || self.eat_keyword("opaque")
-        {
-            return Some(Decl::Ffi(self.reserved_named("ffi")));
+        if self.eat_keyword("ffi") {
+            self.expect_keyword("module");
+            return self.ffi_module_decl().map(Decl::FfiModule);
+        }
+        if self.eat_keyword("struct") {
+            return self.ffi_struct_decl().map(Decl::FfiStruct);
+        }
+        if self.eat_keyword("enum") {
+            return self.ffi_enum_decl().map(Decl::FfiEnum);
+        }
+        if self.eat_keyword("opaque") {
+            return self.ffi_opaque_decl().map(Decl::FfiOpaque);
         }
         self.error_here("LUME2001", "expected top-level declaration");
         None
@@ -198,6 +210,243 @@ impl Parser {
             params,
             body,
             is_async,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn server_action_decl(&mut self) -> Option<ServerActionDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        let params = if self.check_symbol('(') {
+            self.params()
+        } else {
+            Vec::new()
+        };
+        self.expect_symbol(':');
+        let return_ty = self.collect_raw_until(&[
+            "{",
+            "validate",
+            "auth",
+            "csrf",
+            "rateLimit",
+            "revalidate",
+            "transaction",
+            "runtime",
+            "invalidates",
+            "maxBodySize",
+        ]);
+        let mut modifiers = Vec::new();
+        while !self.at_eof() && !self.check_symbol('{') {
+            let modifier_start = self.current().span.start;
+            let Some(name) = self.ident_or_keyword() else {
+                self.advance();
+                continue;
+            };
+            let value = if self.check_symbol('{') {
+                self.skip_balanced_block();
+                None
+            } else {
+                let raw = self.collect_raw_until(&[
+                    "{",
+                    "validate",
+                    "auth",
+                    "csrf",
+                    "rateLimit",
+                    "revalidate",
+                    "transaction",
+                    "runtime",
+                    "invalidates",
+                    "maxBodySize",
+                ]);
+                let raw = raw.trim().to_string();
+                (!raw.is_empty()).then_some(raw)
+            };
+            modifiers.push(ServerModifier {
+                name,
+                value,
+                span: Span::new(modifier_start, self.previous().span.end),
+            });
+        }
+        let body = self.block()?;
+        Some(ServerActionDecl {
+            name,
+            params,
+            return_ty: return_ty.trim().to_string(),
+            modifiers,
+            body,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn query_decl(&mut self, is_server: bool) -> Option<QueryDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        let key = if self.eat_keyword("key") {
+            self.expect_operator("=");
+            Some(self.expr_until(&["="]))
+        } else {
+            None
+        };
+        self.expect_operator("=");
+        let source = self.expr_until(&[
+            "}", "query", "server", "component", "page", "route", "style", "theme", "ffi",
+        ]);
+        Some(QueryDecl {
+            name,
+            key,
+            source,
+            is_server,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn ffi_module_decl(&mut self) -> Option<FfiModuleDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        self.expect_symbol('{');
+        let mut module = FfiModuleDecl {
+            name,
+            span: Span::new(start, start),
+            ..Default::default()
+        };
+        while !self.at_eof() && !self.eat_symbol('}') {
+            let item_start = self.current().span.start;
+            let Some(item) = self.ident_or_keyword() else {
+                self.advance();
+                continue;
+            };
+            match item.as_str() {
+                "language" => module.language = Some(self.string_or_raw_atom()),
+                "library" => module.library = Some(self.string_or_raw_atom()),
+                "header" => module.header = Some(self.string_or_raw_atom()),
+                "sources" => module.sources = self.string_list_or_atom(),
+                "fn" => {
+                    if let Some(function) = self.ffi_function_decl(item_start) {
+                        module.functions.push(function);
+                    }
+                }
+                _ => {
+                    if self.check_symbol('{') {
+                        self.skip_balanced_block();
+                    } else {
+                        self.advance();
+                    }
+                }
+            }
+        }
+        module.span = Span::new(start, self.previous().span.end);
+        Some(module)
+    }
+
+    fn ffi_function_decl(&mut self, start: usize) -> Option<FfiFunctionDecl> {
+        let name = self.ident_or_keyword()?;
+        let params = if self.check_symbol('(') {
+            self.params()
+        } else {
+            Vec::new()
+        };
+        self.expect_symbol(':');
+        let return_ty = self.collect_raw_until(&["}", "fn", "ownership", "callback"]);
+        let mut ownership = None;
+        let mut callback = false;
+        while !self.at_eof() && !self.check_symbol('}') && !self.check_identish("fn") {
+            if self.eat_identish("ownership") {
+                ownership = Some(self.string_or_raw_atom());
+            } else if self.eat_identish("callback") {
+                callback = true;
+            } else {
+                break;
+            }
+        }
+        Some(FfiFunctionDecl {
+            name,
+            params,
+            return_ty: return_ty.trim().to_string(),
+            ownership,
+            callback,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn ffi_struct_decl(&mut self) -> Option<FfiStructDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        let mut repr = None;
+        if self.eat_identish("repr") {
+            repr = Some(self.string_or_raw_atom());
+        }
+        self.expect_symbol('{');
+        let mut fields = Vec::new();
+        while !self.at_eof() && !self.eat_symbol('}') {
+            let field_start = self.current().span.start;
+            let Some(name) = self.ident_or_keyword() else {
+                self.advance();
+                continue;
+            };
+            self.expect_symbol(':');
+            let ty = self.collect_raw_until(&[",", "}"]);
+            fields.push(Param {
+                name,
+                ty: ty.trim().to_string(),
+                default: None,
+                span: Span::new(field_start, self.previous().span.end),
+            });
+            self.eat_symbol(',');
+        }
+        Some(FfiStructDecl {
+            name,
+            fields,
+            repr,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn ffi_enum_decl(&mut self) -> Option<FfiEnumDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        let mut repr = None;
+        if self.eat_identish("repr") {
+            repr = Some(self.string_or_raw_atom());
+        }
+        self.expect_symbol('{');
+        let mut variants = Vec::new();
+        while !self.at_eof() && !self.eat_symbol('}') {
+            if let Some(variant) = self.ident_or_keyword() {
+                variants.push(variant);
+            } else {
+                self.advance();
+            }
+            self.eat_symbol(',');
+        }
+        Some(FfiEnumDecl {
+            name,
+            variants,
+            repr,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn ffi_opaque_decl(&mut self) -> Option<FfiOpaqueDecl> {
+        let start = self.previous().span.start;
+        let name = self.ident_or_keyword()?;
+        let mut ownership = None;
+        let mut lifetime = None;
+        while !self.at_eof() && !self.check_symbol('}') && !self.check_top_level_start() {
+            if self.eat_identish("ownership") {
+                ownership = Some(self.string_or_raw_atom());
+            } else if self.eat_identish("lifetime") {
+                lifetime = Some(self.string_or_raw_atom());
+            } else if self.check_symbol('{') {
+                self.skip_balanced_block();
+                break;
+            } else {
+                break;
+            }
+        }
+        Some(FfiOpaqueDecl {
+            name,
+            ownership,
+            lifetime,
             span: Span::new(start, self.previous().span.end),
         })
     }
@@ -580,14 +829,78 @@ impl Parser {
     fn route_decl(&mut self) -> Option<RouteDecl> {
         let start = self.previous().span.start;
         let path = self.string()?;
-        let view = if self.check_symbol('{') {
-            self.view_block()
-        } else {
-            None
-        };
+        let attrs = self.route_attrs();
+        let body = self.route_body()?;
         Some(RouteDecl {
             path,
-            view,
+            attrs,
+            body,
+            span: Span::new(start, self.previous().span.end),
+        })
+    }
+
+    fn route_attrs(&mut self) -> Vec<RouteAttr> {
+        let mut attrs = Vec::new();
+        while !self.at_eof() && !self.check_symbol('{') {
+            let attr_start = self.current().span.start;
+            let Some(name) = self.ident_or_keyword() else {
+                self.advance();
+                continue;
+            };
+            match name.as_str() {
+                "layout" => {
+                    self.expect_operator("=");
+                    if let Some(layout) = self.ident_or_keyword() {
+                        attrs.push(RouteAttr::Layout {
+                            name: layout,
+                            span: Span::new(attr_start, self.previous().span.end),
+                        });
+                    }
+                }
+                "guard" => {
+                    self.eat_operator("=");
+                    let expr = self.expr_until(&["{", "layout", "guard"]);
+                    attrs.push(RouteAttr::Guard {
+                        span: Span::new(attr_start, self.previous().span.end),
+                        expr,
+                    });
+                }
+                _ => {
+                    self.error_here("LUME2007", format!("unknown route attribute `{name}`"));
+                    self.expr_until(&["{", "layout", "guard"]);
+                }
+            }
+        }
+        attrs
+    }
+
+    fn route_body(&mut self) -> Option<RouteBody> {
+        let start = self.current().span.start;
+        self.expect_symbol('{');
+        let mut index = None;
+        let mut children = Vec::new();
+        let mut view_nodes = Vec::new();
+        while !self.at_eof() && !self.eat_symbol('}') {
+            if self.eat_identish("index") {
+                index = self.view_block();
+                continue;
+            }
+            if self.eat_keyword("route") {
+                if let Some(route) = self.route_decl() {
+                    children.push(route);
+                }
+                continue;
+            }
+            if let Some(node) = self.view_node() {
+                view_nodes.push(node);
+            } else {
+                self.advance();
+            }
+        }
+        Some(RouteBody {
+            index,
+            children,
+            view_nodes,
             span: Span::new(start, self.previous().span.end),
         })
     }
@@ -603,6 +916,33 @@ impl Parser {
             name,
             span: Span::new(start, self.previous().span.end),
         }
+    }
+
+    fn string_or_raw_atom(&mut self) -> String {
+        match &self.current().kind {
+            TokenKind::String(value) => {
+                let value = value.clone();
+                self.advance();
+                value
+            }
+            _ => {
+                let value = token_text(self.current());
+                self.advance();
+                value.trim_matches(['"', '\'']).to_string()
+            }
+        }
+    }
+
+    fn string_list_or_atom(&mut self) -> Vec<String> {
+        if !self.eat_symbol('[') {
+            return vec![self.string_or_raw_atom()];
+        }
+        let mut values = Vec::new();
+        while !self.at_eof() && !self.eat_symbol(']') {
+            values.push(self.string_or_raw_atom());
+            self.eat_symbol(',');
+        }
+        values
     }
 
     fn expr_until(&mut self, stops: &[&str]) -> Expr {
@@ -689,7 +1029,7 @@ impl Parser {
             ")" => self.check_symbol(')'),
             "," => self.check_symbol(','),
             ";" => self.check_symbol(';'),
-            kw => self.check_keyword(kw),
+            text => token_text(self.current()) == text,
         })
     }
 
@@ -768,6 +1108,44 @@ impl Parser {
         } else {
             false
         }
+    }
+
+    fn eat_identish(&mut self, value: &str) -> bool {
+        if self.is_identish() && token_text(self.current()) == value {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_identish(&self, value: &str) -> bool {
+        self.is_identish() && token_text(self.current()) == value
+    }
+
+    fn check_top_level_start(&self) -> bool {
+        self.is_identish()
+            && matches!(
+                token_text(self.current()).as_str(),
+                "module"
+                    | "import"
+                    | "export"
+                    | "component"
+                    | "page"
+                    | "layout"
+                    | "route"
+                    | "style"
+                    | "theme"
+                    | "type"
+                    | "app"
+                    | "server"
+                    | "query"
+                    | "form"
+                    | "ffi"
+                    | "struct"
+                    | "enum"
+                    | "opaque"
+            )
     }
 
     fn eat_operator(&mut self, operator: &str) -> bool {
@@ -850,7 +1228,7 @@ fn needs_space(raw: &str, token: &Token) -> bool {
 #[cfg(test)]
 mod tests {
     use super::parse;
-    use lume_ast::{ComponentItem, Decl, ViewNode};
+    use lume_ast::{ComponentItem, Decl, RouteAttr, ViewNode};
 
     #[test]
     fn parses_counter_component() {
@@ -924,5 +1302,95 @@ component App {
         };
         assert_eq!(event.event, "input");
         assert_eq!(event.params, vec!["value"]);
+    }
+
+    #[test]
+    fn parses_server_action_decl() {
+        let source = r#"
+server action add(a: i64, b: i64): i64 runtime native auth required csrf false {
+  return a + b
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let Decl::ServerAction(action) = &program.declarations[0] else {
+            panic!("expected server action");
+        };
+        assert_eq!(action.name, "add");
+        assert_eq!(action.params.len(), 2);
+        assert_eq!(action.return_ty, "i64");
+        assert!(action
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.name == "runtime"
+                && modifier.value.as_deref() == Some("native")));
+        assert!(action
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.name == "csrf" && modifier.value.as_deref() == Some("false")));
+    }
+
+    #[test]
+    fn parses_nested_route_tree() {
+        let source = r#"
+layout SettingsLayout {
+  view {
+    Outlet()
+  }
+}
+
+route "/settings" layout=SettingsLayout guard=requireLogin {
+  index {
+    SettingsHome()
+  }
+
+  route "profile/:id" {
+    ProfilePage(id=params.id)
+  }
+
+  route "docs/*path" guard=[requireLogin, requireDocs] {
+    DocsPage(path=params.path)
+  }
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let route = program
+            .declarations
+            .iter()
+            .find_map(|decl| match decl {
+                Decl::Route(route) => Some(route),
+                _ => None,
+            })
+            .expect("route");
+        assert_eq!(route.path, "/settings");
+        assert!(matches!(
+            &route.attrs[0],
+            RouteAttr::Layout { name, .. } if name == "SettingsLayout"
+        ));
+        assert!(route.body.index.is_some());
+        assert_eq!(route.body.children.len(), 2);
+        assert_eq!(route.body.children[0].path, "profile/:id");
+        assert_eq!(route.body.children[1].path, "docs/*path");
     }
 }

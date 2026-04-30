@@ -1,0 +1,33 @@
+server action submitNote(note: String): String auth optional csrf true invalidates notes maxBodySize 256 rateLimit "10/min" transaction write {
+  note = note + " [accepted]";
+  return note
+}
+
+component App {
+  state note: String = "Remember the manifest"
+  state result: String = ""
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Server Action metadata")
+
+      Input(value=note, label="Note", placeholder="Write a note") {
+        on input(value) {
+          note = value
+        }
+      }
+
+      Button("Submit") {
+        on click {
+          result = await submitNote(note)
+        }
+      }
+
+      if result != "" {
+        Text("Result: {result}")
+      } else {
+        Text("No submission yet.")
+      }
+    }
+  }
+}

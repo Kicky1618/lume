@@ -9,9 +9,10 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         .states()
         .map(|state| state.name.clone())
         .collect::<HashSet<_>>();
-    let dynamic_view = program
-        .view()
-        .is_some_and(|view| view_has_dynamic(view, program));
+    let dynamic_view = !program.routes.is_empty()
+        || program
+            .view()
+            .is_some_and(|view| view_has_dynamic(view, program));
     let mut js = String::new();
     js.push_str("const fallbackState = {\n");
     for state in program.states() {
@@ -23,6 +24,69 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
     }
     js.push_str("};\n\n");
     js.push_str("const state = {};\n\n");
+    if !program.server_actions.is_empty() {
+        js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"dev-csrf-token\";\n\n");
+        js.push_str("const serverActionParams = {\n");
+        for action in &program.server_actions {
+            let params = action
+                .params
+                .iter()
+                .map(|param| format!("{:?}", param.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            js.push_str(&format!("  {:?}: [{}],\n", action.name, params));
+        }
+        js.push_str("};\n\n");
+        js.push_str("async function callServerAction(id, args) {\n");
+        js.push_str(
+            "  const response = await fetch(`/__lume/actions/${encodeURIComponent(id)}`, {\n",
+        );
+        js.push_str("    method: \"POST\",\n");
+        js.push_str("    headers: { \"content-type\": \"application/json\", \"x-lume-csrf\": lumeCsrfToken },\n");
+        js.push_str("    body: JSON.stringify({ args })\n");
+        js.push_str("  });\n");
+        js.push_str("  const payload = await response.json().catch(() => ({}));\n");
+        js.push_str(
+            "  if (!response.ok) throw new Error(payload.error || `Server Action ${id} failed`);\n",
+        );
+        js.push_str("  for (const key of payload.revalidate || []) lumeQueryCache.invalidate(key);\n");
+        js.push_str("  return payload.value;\n");
+        js.push_str("}\n\n");
+        for action in &program.server_actions {
+            js.push_str(&format!(
+                "async function {}(...args) {{\n  return callServerAction({:?}, args);\n}}\n\n",
+                action.name, action.name
+            ));
+        }
+    }
+    if !program.queries.is_empty() || !program.server_actions.is_empty() {
+        js.push_str("const lumeQueryCache = {\n");
+        js.push_str("  values: new Map(),\n");
+        js.push_str("  key(value) { return JSON.stringify(value ?? []); },\n");
+        js.push_str("  async query(key, loader) {\n");
+        js.push_str("    const id = this.key(key);\n");
+        js.push_str("    if (this.values.has(id)) return this.values.get(id);\n");
+        js.push_str("    const entry = { loading: true, error: null, data: null, refetch: async () => loader() };\n");
+        js.push_str("    this.values.set(id, entry);\n");
+        js.push_str("    try { entry.data = await loader(); } catch (error) { entry.error = error; throw error; } finally { entry.loading = false; }\n");
+        js.push_str("    return entry;\n");
+        js.push_str("  },\n");
+        js.push_str("  invalidate(key) { this.values.delete(this.key(key)); }\n");
+        js.push_str("};\n\n");
+        for query in program.queries.iter().filter(|query| !query.is_server) {
+            let key = query
+                .key
+                .as_ref()
+                .map(|expr| expr.raw.as_str())
+                .unwrap_or_else(|| query.name.as_str());
+            js.push_str(&format!(
+                "async function query_{}() {{\n  return lumeQueryCache.query({}, async () => fetch({}).then(response => response.json()));\n}}\n\n",
+                query.name,
+                js_raw_array_or_string(key),
+                query_source_url(&query.source)
+            ));
+        }
+    }
     js.push_str("async function restoreInitialState() {\n");
     js.push_str("  Object.assign(state, fallbackState);\n");
     js.push_str("  try {\n");
@@ -47,6 +111,9 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str("}\n\n");
         if let Some(view) = program.view() {
             let mut ctx = RenderCtx::default();
+            if !program.routes.is_empty() {
+                js.push_str(&route_runtime(program, &mut ctx, &state_names));
+            }
             js.push_str("function render_app() {\n");
             js.push_str("  return ");
             js.push_str(&render_view_expr(
@@ -62,6 +129,9 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str("function render_all() {\n");
         js.push_str("  const focus = captureFocus();\n");
         js.push_str("  root.innerHTML = render_app();\n");
+        if !program.routes.is_empty() {
+            js.push_str("  updateNavLinks();\n");
+        }
         js.push_str("  restoreFocus(focus);\n");
         js.push_str("}\n\n");
         js.push_str("function captureFocus() {\n");
@@ -118,7 +188,7 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
     }
     js.push_str("const actions = {\n");
     for event in &html.events {
-        js.push_str(&format!("  {}(event, target) {{\n", event.id));
+        js.push_str(&format!("  async {}(event, target) {{\n", event.id));
         if !event.loop_params.is_empty() {
             js.push_str(
                 "    const scope = JSON.parse(decodeURIComponent(target.getAttribute(\"data-lume-scope\") || \"%7B%7D\"));\n",
@@ -156,10 +226,33 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str("  const eventSpec = target.getAttribute(\"data-lume-event\");\n");
         for event in html.events.iter().filter(|event| event.event == event_name) {
             js.push_str(&format!(
-                "  if (eventSpec === \"{}:{}\") actions[{}](event, target);\n",
+                "  if (eventSpec === \"{}:{}\") void actions[{}](event, target);\n",
                 event.event, event.id, event.id
             ));
         }
+        js.push_str("});\n\n");
+    }
+    if !program.server_actions.is_empty() {
+        js.push_str("root.addEventListener(\"submit\", event => {\n");
+        js.push_str("  const form = event.target.closest(\"form[data-lume-form-action]\");\n");
+        js.push_str("  if (!form) return;\n");
+        js.push_str("  event.preventDefault();\n");
+        js.push_str("  const id = form.dataset.lumeFormAction;\n");
+        js.push_str("  const data = new FormData(form);\n");
+        js.push_str("  const args = (serverActionParams[id] || []).map(name => {\n");
+        js.push_str("    const value = data.get(name);\n");
+        js.push_str("    if (value === null) return null;\n");
+        js.push_str("    if (/^-?\\d+$/.test(value)) return Number(value);\n");
+        js.push_str("    if (value === \"true\") return true;\n");
+        js.push_str("    if (value === \"false\") return false;\n");
+        js.push_str("    return value;\n");
+        js.push_str("  });\n");
+        js.push_str("  void callServerAction(id, args).then(value => {\n");
+        js.push_str("    form.dispatchEvent(new CustomEvent(\"lume:success\", { bubbles: true, detail: { value } }));\n");
+        js.push_str("    render_all();\n");
+        js.push_str("  }).catch(error => {\n");
+        js.push_str("    form.dispatchEvent(new CustomEvent(\"lume:error\", { bubbles: true, detail: { error } }));\n");
+        js.push_str("  });\n");
         js.push_str("});\n\n");
     }
     js.push_str("await restoreInitialState();\n");
@@ -252,6 +345,7 @@ fn render_element_template(
         return render_component_template(element, ctx, locals, states, program);
     }
     match element.name.as_str() {
+        "Outlet" => "${render_route()}".into(),
         "Text" => {
             let expr = first_arg(element).cloned().unwrap_or(Expr {
                 raw: "\"\"".into(),
@@ -262,6 +356,10 @@ fn render_element_template(
         "Button" => render_button_template(element, ctx, locals, states),
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
+        "Link" | "NavLink" | "Anchor" => {
+            render_link_template(element, ctx, locals, states, program)
+        }
+        "Form" => render_form_template(element, ctx, locals, states, program),
         _ => render_container_template(element, ctx, locals, states, program),
     }
 }
@@ -288,6 +386,68 @@ fn render_component_template(
     format!("${{{html}}}")
 }
 
+fn route_runtime(program: &LumeProgram, ctx: &mut RenderCtx, states: &HashSet<String>) -> String {
+    let routes = program
+        .routes
+        .iter()
+        .filter(|route| route.view.is_some())
+        .map(|route| {
+            let segments = route
+                .segments
+                .iter()
+                .map(route_segment_js)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "  {{ renderer: {}, segments: [{}] }}",
+                route_renderer_name(&route.id),
+                segments
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let renderers = program
+        .routes
+        .iter()
+        .filter_map(|route| {
+            let view = route.view.as_ref()?;
+            let mut locals = HashSet::new();
+            locals.insert("params".into());
+            let body = render_view_expr(view, ctx, &locals, states, program);
+            Some(format!(
+                "function {}(params) {{\n  return {};\n}}\n",
+                route_renderer_name(&route.id),
+                body
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "const routeTable = [\n{}\n];\n\n{}\nfunction normalizeRoutePath(path) {{\n  if (!path || path === \"/\") return \"/\";\n  return path.endsWith(\"/\") ? path.slice(0, -1) : path;\n}}\n\nfunction matchRoute(route, path) {{\n  const parts = path === \"/\" ? [] : path.replace(/^\\//, \"\").split(\"/\");\n  const params = {{}};\n  let index = 0;\n  for (const segment of route.segments) {{\n    if (segment.kind === \"static\") {{\n      if (parts[index] !== segment.value) return null;\n      index += 1;\n    }} else if (segment.kind === \"dynamic\") {{\n      const value = parts[index];\n      if (value === undefined) return null;\n      if (segment.type !== \"String\" && !/^-?\\d+$/.test(value)) return null;\n      params[segment.name] = value;\n      index += 1;\n    }} else if (segment.kind === \"catchAll\") {{\n      params[segment.name] = parts.slice(index).join(\"/\");\n      index = parts.length;\n      break;\n    }}\n  }}\n  return index === parts.length ? params : null;\n}}\n\nfunction render_route() {{\n  const path = normalizeRoutePath(window.location.pathname);\n  for (const route of routeTable) {{\n    const params = matchRoute(route, path);\n    if (params) return route.renderer(params);\n  }}\n  return \"\";\n}}\n\nfunction navigate(to) {{\n  const url = new URL(to, window.location.href);\n  if (url.origin !== window.location.origin) {{\n    window.location.href = url.href;\n    return;\n  }}\n  if (url.pathname === window.location.pathname && url.search === window.location.search) return;\n  history.pushState(null, \"\", url.pathname + url.search + url.hash);\n  render_all();\n}}\n\nwindow.addEventListener(\"popstate\", () => render_all());\n\nroot.addEventListener(\"click\", event => {{\n  const link = event.target.closest(\"a[data-lume-link]\");\n  if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target) return;\n  const url = new URL(link.getAttribute(\"href\") || \"\", window.location.href);\n  if (url.origin !== window.location.origin) return;\n  event.preventDefault();\n  navigate(url.pathname + url.search + url.hash);\n}});\n\nfunction updateNavLinks() {{\n  const current = normalizeRoutePath(window.location.pathname);\n  for (const link of root.querySelectorAll(\"a[data-lume-navlink]\")) {{\n    const href = normalizeRoutePath(new URL(link.getAttribute(\"href\") || \"/\", window.location.href).pathname);\n    const active = href === current;\n    link.toggleAttribute(\"aria-current\", active);\n    link.classList.toggle(\"is-active\", active);\n  }}\n}}\n\n",
+        routes, renderers
+    )
+}
+
+fn route_segment_js(segment: &lume_ir::RouteSegment) -> String {
+    match segment {
+        lume_ir::RouteSegment::Static(value) => {
+            format!("{{ kind: \"static\", value: {:?} }}", value)
+        }
+        lume_ir::RouteSegment::Dynamic { name, ty } => format!(
+            "{{ kind: \"dynamic\", name: {:?}, type: {:?} }}",
+            name,
+            ty.as_deref().unwrap_or("String")
+        ),
+        lume_ir::RouteSegment::CatchAll { name } => {
+            format!("{{ kind: \"catchAll\", name: {:?} }}", name)
+        }
+    }
+}
+
+fn route_renderer_name(id: &str) -> String {
+    format!("render_route_{}", id.replace('-', "_"))
+}
+
 fn render_text_template(expr: &Expr, locals: &HashSet<String>, states: &HashSet<String>) -> String {
     let template = expr.raw.trim().trim_matches('"');
     let mut html = String::from("<span>");
@@ -306,7 +466,10 @@ fn render_button_template(
         .map(|e| template_html(e.raw.trim().trim_matches('"'), locals, states))
         .unwrap_or_default();
     let event_attr = event_attr_template(element, ctx, locals, states);
-    format!("<button{}>{}</button>", event_attr, label)
+    let type_attr = attr_value(element, "type")
+        .map(|e| format!(" type=\"{}\"", escape_template(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
+    format!("<button{}{}>{}</button>", event_attr, type_attr, label)
 }
 
 fn render_input_template(
@@ -329,6 +492,18 @@ fn render_input_template(
         html.push_str(&format!(
             " placeholder=\"{}\"",
             escape_template(placeholder.raw.trim_matches('"'))
+        ));
+    }
+    if let Some(name) = attr_value(element, "name") {
+        html.push_str(&format!(
+            " name=\"{}\"",
+            escape_template(name.raw.trim_matches('"'))
+        ));
+    }
+    if let Some(input_type) = attr_value(element, "type") {
+        html.push_str(&format!(
+            " type=\"{}\"",
+            escape_template(input_type.raw.trim_matches('"'))
         ));
     }
     html.push('>');
@@ -369,6 +544,89 @@ fn render_image_template(
     format!(
         "<img data-lume-id=\"{}\" src=\"{}\" alt=\"{}\">",
         id, src, alt
+    )
+}
+
+fn render_link_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+    program: &LumeProgram,
+) -> String {
+    let id = node_id(ctx);
+    let href = attr_value(element, "to")
+        .or_else(|| attr_value(element, "href"))
+        .map(|expr| attr_template_expr(expr, locals, states))
+        .unwrap_or_else(|| "#".into());
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| {
+            let expr = render_view_expr(view, ctx, locals, states, program);
+            format!("${{{expr}}}")
+        })
+        .unwrap_or_else(|| {
+            first_arg(element)
+                .map(|e| template_html(e.raw.trim().trim_matches('"'), locals, states))
+                .unwrap_or_default()
+        });
+    let nav_attr = if element.name == "NavLink" {
+        " data-lume-navlink=\"true\""
+    } else {
+        ""
+    };
+    format!(
+        "<a data-lume-id=\"{}\" href=\"{}\" data-lume-link=\"true\"{}>{}</a>",
+        id, href, nav_attr, children
+    )
+}
+
+fn render_form_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+    program: &LumeProgram,
+) -> String {
+    let id = node_id(ctx);
+    let method = attr_value(element, "method")
+        .map(|e| e.raw.trim_matches('"').to_ascii_lowercase())
+        .unwrap_or_else(|| "post".into());
+    let action = attr_value(element, "action").map(|e| e.raw.trim().trim_matches('"').to_string());
+    let action_attr = action
+        .as_ref()
+        .map(|name| {
+            if name.starts_with('/') || name.starts_with("http://") || name.starts_with("https://")
+            {
+                format!(" action=\"{}\"", escape_template(name))
+            } else {
+                format!(" action=\"/__lume/actions/{}\"", escape_template(name))
+            }
+        })
+        .unwrap_or_default();
+    let form_action_attr = action
+        .as_ref()
+        .filter(|name| {
+            !name.starts_with('/') && !name.starts_with("http://") && !name.starts_with("https://")
+        })
+        .map(|name| format!(" data-lume-form-action=\"{}\"", escape_template(name)))
+        .unwrap_or_default();
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| {
+            let expr = render_view_expr(view, ctx, locals, states, program);
+            format!("${{{expr}}}")
+        })
+        .unwrap_or_default();
+    format!(
+        "<form data-lume-id=\"{}\" method=\"{}\"{}{}>{}</form>",
+        id,
+        escape_template(&method),
+        action_attr,
+        form_action_attr,
+        children
     )
 }
 
@@ -674,6 +932,25 @@ fn is_string_literal(raw: &str) -> bool {
     (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
 }
 
+fn js_raw_array_or_string(raw: &str) -> String {
+    let raw = raw.trim();
+    if raw.starts_with('[') || is_string_literal(raw) {
+        raw.to_string()
+    } else {
+        format!("{:?}", raw)
+    }
+}
+
+fn query_source_url(expr: &Expr) -> String {
+    let raw = expr.raw.trim();
+    if let Some(start) = raw.find('"') {
+        if let Some(end) = raw[start + 1..].find('"') {
+            return format!("{:?}", &raw[start + 1..start + 1 + end]);
+        }
+    }
+    format!("{:?}", raw)
+}
+
 fn render_name(node_id: &str) -> String {
     format!("render_{node_id}")
 }
@@ -841,5 +1118,152 @@ component App {
         assert!(js.contains("function encodeScope(scope)"));
         assert!(js.contains("data-lume-focus-key=\"${escapeAttr(\""));
         assert!(js.contains("+ encodeScope({item: item, index: index})"));
+    }
+
+    #[test]
+    fn generates_server_action_client_stubs() {
+        let source = r#"
+server action add(amount: i64): i64 {
+  return amount
+}
+
+component App {
+  state count: i64 = 0
+
+  view {
+    Button("Save") {
+      on click {
+        add(count)
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("async function callServerAction(id, args)"));
+        assert!(js.contains("async function add(...args)"));
+        assert!(js.contains("return callServerAction(\"add\", args);"));
+        assert!(js.contains("void actions[0](event, target);"));
+        assert!(js.contains("add(state.count);"));
+    }
+
+    #[test]
+    fn generates_outlet_route_renderer() {
+        let source = r#"
+layout Shell {
+  view {
+    Column {
+      Text("Shell")
+      Outlet()
+    }
+  }
+}
+
+component Home {
+  view {
+    Text("Home")
+  }
+}
+
+component Login {
+  view {
+    Text("Login required")
+  }
+}
+
+component User(id: String) {
+  view {
+    Text("User {id}")
+  }
+}
+
+route "/" layout=Shell {
+  index {
+    Home()
+  }
+
+  route "users" {
+    route "login" {
+      Login()
+    }
+
+    route ":id<String>" {
+      User(id=params.id)
+    }
+  }
+}
+
+component App {
+  view {
+    Shell()
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("function render_route()"));
+        assert!(js.contains("render_route_users_login"));
+        assert!(js.contains("Login required"));
+        assert!(js.contains("User ${escapeHtml(params.id)}"));
+        assert!(js.contains("${render_route()}"));
+    }
+
+    #[test]
+    fn generates_link_navigation_and_form_action_helpers() {
+        let source = r#"
+server action save(message: String): String {
+  return message
+}
+
+component Home {
+  view {
+    Column {
+      NavLink("Users", to="/users")
+      Form action=save method="post" {
+        Input(name="message", label="Message")
+        Button("Save", type="submit")
+      }
+    }
+  }
+}
+
+route "/" {
+  index {
+    Home()
+  }
+
+  route "users" {
+    Text("Users")
+  }
+}
+
+component App {
+  view {
+    Column {
+      Link("Home", to="/")
+      Outlet()
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("function navigate(to)"));
+        assert!(js.contains("root.addEventListener(\"click\""));
+        assert!(js.contains("data-lume-link=\"true\""));
+        assert!(js.contains("data-lume-navlink=\"true\""));
+        assert!(js.contains("serverActionParams"));
+        assert!(js.contains("form[data-lume-form-action]"));
+        assert!(js.contains("data-lume-form-action=\"save\""));
     }
 }

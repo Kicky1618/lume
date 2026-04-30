@@ -3,5 +3,12 @@ name = "lume_codegen_llvm"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+inkwell.workspace = true
+lume_ast = { path = "../lume_ast" }
+
+[dev-dependencies]
+lume_parser = { path = "../lume_parser" }
+
 [lib]
 path = "src/lib.rs"

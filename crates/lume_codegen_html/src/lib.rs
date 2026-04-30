@@ -1,6 +1,7 @@
 use lume_ast::*;
 use lume_codegen_css::{layout_class, style_class_for, style_ref_class};
 use lume_ir::LumeProgram;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub struct HtmlOutput {
@@ -33,6 +34,8 @@ pub fn generate(program: &LumeProgram) -> HtmlOutput {
         bindings: Vec::new(),
         events: Vec::new(),
         loop_params: Vec::new(),
+        locals: HashMap::new(),
+        state: initial_state(program),
         component_stack: Vec::new(),
     };
     let body = program
@@ -57,6 +60,8 @@ struct Ctx {
     bindings: Vec<Binding>,
     events: Vec<EventBinding>,
     loop_params: Vec<String>,
+    locals: HashMap<String, Value>,
+    state: HashMap<String, Value>,
     component_stack: Vec<String>,
 }
 
@@ -73,17 +78,18 @@ fn render_node(node: &ViewNode, ctx: &mut Ctx, program: &LumeProgram) -> String 
         ViewNode::Element(element) => render_element(element, ctx, program),
         ViewNode::Text(text) => render_text_expr(&text.value, ctx),
         ViewNode::If(node) => {
-            let then_html = render_view(&node.then_block, ctx, program);
-            let else_html = node
-                .else_block
-                .as_ref()
-                .map(|block| render_view(block, ctx, program))
-                .unwrap_or_default();
+            let body = if eval_expr(&node.condition, ctx).is_truthy() {
+                render_view(&node.then_block, ctx, program)
+            } else {
+                node.else_block
+                    .as_ref()
+                    .map(|block| render_view(block, ctx, program))
+                    .unwrap_or_default()
+            };
             format!(
-                "<!-- lume-if:{} -->{}{}\n",
+                "<!-- lume-if:{} -->{}",
                 escape_attr(&node.condition.raw),
-                then_html,
-                else_html
+                body
             )
         }
         ViewNode::For(node) => {
@@ -92,7 +98,37 @@ fn render_node(node: &ViewNode, ctx: &mut Ctx, program: &LumeProgram) -> String 
             if let Some(index) = &pushed_index {
                 ctx.loop_params.push(index.clone());
             }
-            let html = render_view(&node.body, ctx, program);
+            let previous_item = ctx.locals.get(&node.item).cloned();
+            let previous_index = pushed_index
+                .as_ref()
+                .and_then(|index| ctx.locals.get(index).cloned());
+            let html = match eval_expr(&node.iterable, ctx) {
+                Value::Array(items) => items
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        ctx.locals.insert(node.item.clone(), item);
+                        if let Some(name) = &pushed_index {
+                            ctx.locals.insert(name.clone(), Value::Number(index as f64));
+                        }
+                        render_view(&node.body, ctx, program)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+                _ => String::new(),
+            };
+            if let Some(value) = previous_item {
+                ctx.locals.insert(node.item.clone(), value);
+            } else {
+                ctx.locals.remove(&node.item);
+            }
+            if let Some(name) = &pushed_index {
+                if let Some(value) = previous_index {
+                    ctx.locals.insert(name.clone(), value);
+                } else {
+                    ctx.locals.remove(name);
+                }
+            }
             if pushed_index.is_some() {
                 ctx.loop_params.pop();
             }
@@ -126,6 +162,8 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "Button" => render_button(element, ctx),
         "Input" => render_input(element, ctx),
         "Image" => render_image(element, ctx),
+        "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
+        "Form" => render_form(element, ctx, program),
         "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
         _ => render_container(element, ctx, program),
     }
@@ -164,20 +202,24 @@ fn render_text_expr(expr: &Expr, ctx: &mut Ctx) -> String {
         "<span data-lume-id=\"{}\"{}>{}</span>\n",
         id,
         bind_attr(&template),
-        escape_html(&render_template_initial(&template))
+        escape_html(&render_template_initial(&template, ctx))
     )
 }
 
 fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
     let id = node_id(ctx);
     let label = first_arg(element)
-        .map(|e| e.raw.trim().trim_matches('"').to_string())
+        .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
         .unwrap_or_default();
     let event_attr = event_attr(element, ctx, &id);
+    let type_attr = attr_value(element, "type")
+        .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
     format!(
-        "<button data-lume-id=\"{}\"{}>{}</button>\n",
+        "<button data-lume-id=\"{}\"{}{}>{}</button>\n",
         id,
         event_attr,
+        type_attr,
         escape_html(&label)
     )
 }
@@ -185,31 +227,110 @@ fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
 fn render_input(element: &ElementNode, ctx: &mut Ctx) -> String {
     let id = node_id(ctx);
     let value = attr_value(element, "value")
-        .map(|e| format!(" value=\"{}\"", escape_attr(&e.raw)))
+        .map(|e| format!(" value=\"{}\"", escape_attr(&eval_expr(e, ctx).to_attr())))
         .unwrap_or_default();
     let placeholder = attr_value(element, "placeholder")
         .map(|e| format!(" placeholder=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
         .unwrap_or_default();
+    let name = attr_value(element, "name")
+        .map(|e| format!(" name=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
+    let input_type = attr_value(element, "type")
+        .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
     let event_attr = event_attr(element, ctx, &id);
     format!(
-        "<input data-lume-id=\"{}\"{}{}{}>\n",
-        id, event_attr, value, placeholder
+        "<input data-lume-id=\"{}\"{}{}{}{}{}>\n",
+        id, event_attr, value, placeholder, name, input_type
     )
 }
 
 fn render_image(element: &ElementNode, ctx: &mut Ctx) -> String {
     let id = node_id(ctx);
     let src = attr_value(element, "src")
-        .map(|e| e.raw.trim_matches('"').to_string())
+        .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
         .unwrap_or_default();
     let alt = attr_value(element, "alt")
-        .map(|e| e.raw.trim_matches('"').to_string())
+        .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
         .unwrap_or_default();
     format!(
         "<img data-lume-id=\"{}\" src=\"{}\" alt=\"{}\">\n",
         id,
         escape_attr(&src),
         escape_attr(&alt)
+    )
+}
+
+fn render_link(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    let id = node_id(ctx);
+    let href = attr_value(element, "to")
+        .or_else(|| attr_value(element, "href"))
+        .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
+        .unwrap_or_else(|| "#".into());
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_else(|| {
+            first_arg(element)
+                .map(|e| {
+                    escape_html(&render_template_initial(
+                        e.raw.trim().trim_matches('"'),
+                        ctx,
+                    ))
+                })
+                .unwrap_or_default()
+        });
+    let nav_attr = if element.name == "NavLink" {
+        " data-lume-navlink=\"true\""
+    } else {
+        ""
+    };
+    format!(
+        "<a data-lume-id=\"{}\" href=\"{}\" data-lume-link=\"true\"{}>{}</a>\n",
+        id,
+        escape_attr(&href),
+        nav_attr,
+        children
+    )
+}
+
+fn render_form(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    let id = node_id(ctx);
+    let method = attr_value(element, "method")
+        .map(|e| e.raw.trim_matches('"').to_ascii_lowercase())
+        .unwrap_or_else(|| "post".into());
+    let action = attr_value(element, "action").map(|e| e.raw.trim().trim_matches('"').to_string());
+    let action_attr = action
+        .as_ref()
+        .map(|name| {
+            if name.starts_with('/') || name.starts_with("http://") || name.starts_with("https://")
+            {
+                format!(" action=\"{}\"", escape_attr(name))
+            } else {
+                format!(" action=\"/__lume/actions/{}\"", escape_attr(name))
+            }
+        })
+        .unwrap_or_default();
+    let form_action_attr = action
+        .as_ref()
+        .filter(|name| {
+            !name.starts_with('/') && !name.starts_with("http://") && !name.starts_with("https://")
+        })
+        .map(|name| format!(" data-lume-form-action=\"{}\"", escape_attr(name)))
+        .unwrap_or_default();
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_default();
+    format!(
+        "<form data-lume-id=\"{}\" method=\"{}\"{}{}>\n{}</form>\n",
+        id,
+        escape_attr(&method),
+        action_attr,
+        form_action_attr,
+        indent(&children, 2)
     )
 }
 
@@ -269,11 +390,18 @@ fn event_attr(element: &ElementNode, ctx: &mut Ctx, node_id: &str) -> String {
         loop_params: ctx.loop_params.clone(),
         statements: event.body.statements.clone(),
     });
-    format!(
+    let mut attr = format!(
         " data-lume-event=\"{}:{}\"",
         escape_attr(&event.event),
         event_id
-    )
+    );
+    if !ctx.loop_params.is_empty() {
+        attr.push_str(&format!(
+            " data-lume-scope=\"{}\"",
+            escape_attr(&encode_scope(ctx))
+        ));
+    }
+    attr
 }
 
 fn first_arg(element: &ElementNode) -> Option<&Expr> {
@@ -326,7 +454,7 @@ fn interpolation_deps(template: &str) -> Vec<String> {
     deps
 }
 
-fn render_template_initial(template: &str) -> String {
+fn render_template_initial(template: &str, ctx: &Ctx) -> String {
     let mut out = String::new();
     let mut rest = template;
     while let Some(start) = rest.find('{') {
@@ -336,11 +464,209 @@ fn render_template_initial(template: &str) -> String {
             out.push_str(after);
             return out;
         };
-        out.push('0');
+        out.push_str(
+            &eval_raw(after[..end].trim(), ctx)
+                .map(|value| value.to_text())
+                .unwrap_or_default(),
+        );
         rest = &after[end + 1..];
     }
     out.push_str(rest);
     out
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Value {
+    String(String),
+    Number(f64),
+    Bool(bool),
+    Array(Vec<Value>),
+    Null,
+}
+
+impl Value {
+    fn is_truthy(&self) -> bool {
+        match self {
+            Value::String(value) => !value.is_empty(),
+            Value::Number(value) => *value != 0.0,
+            Value::Bool(value) => *value,
+            Value::Array(value) => !value.is_empty(),
+            Value::Null => false,
+        }
+    }
+
+    fn to_text(&self) -> String {
+        match self {
+            Value::String(value) => value.clone(),
+            Value::Number(value) if value.fract() == 0.0 => format!("{}", *value as i64),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Array(_) | Value::Null => String::new(),
+        }
+    }
+
+    fn to_attr(&self) -> String {
+        self.to_text()
+    }
+}
+
+fn initial_state(program: &LumeProgram) -> HashMap<String, Value> {
+    program
+        .states()
+        .map(|state| (state.name.clone(), parse_value(state.init.raw.trim())))
+        .collect()
+}
+
+fn eval_expr(expr: &Expr, ctx: &Ctx) -> Value {
+    eval_raw(expr.raw.trim(), ctx).unwrap_or(Value::Null)
+}
+
+fn eval_raw(raw: &str, ctx: &Ctx) -> Option<Value> {
+    if let Some(value) = ctx.locals.get(raw).or_else(|| ctx.state.get(raw)) {
+        return Some(value.clone());
+    }
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some((left, right)) = split_binary(raw, op) {
+            let left = eval_raw(left, ctx)?;
+            let right = eval_raw(right, ctx)?;
+            return Some(Value::Bool(compare_values(&left, op, &right)));
+        }
+    }
+    Some(parse_value(raw))
+}
+
+fn split_binary<'a>(raw: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
+    let index = raw.find(op)?;
+    let left = raw[..index].trim();
+    let right = raw[index + op.len()..].trim();
+    (!left.is_empty() && !right.is_empty()).then_some((left, right))
+}
+
+fn compare_values(left: &Value, op: &str, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => match op {
+            ">=" => left >= right,
+            "<=" => left <= right,
+            "==" => left == right,
+            "!=" => left != right,
+            ">" => left > right,
+            "<" => left < right,
+            _ => false,
+        },
+        _ => match op {
+            "==" => left.to_text() == right.to_text(),
+            "!=" => left.to_text() != right.to_text(),
+            _ => false,
+        },
+    }
+}
+
+fn parse_value(raw: &str) -> Value {
+    let raw = raw.trim();
+    if is_string_literal(raw) {
+        return Value::String(raw[1..raw.len().saturating_sub(1)].to_string());
+    }
+    if raw == "true" {
+        return Value::Bool(true);
+    }
+    if raw == "false" {
+        return Value::Bool(false);
+    }
+    if raw == "null" {
+        return Value::Null;
+    }
+    if raw.starts_with('[') && raw.ends_with(']') {
+        return Value::Array(parse_array_items(&raw[1..raw.len() - 1]));
+    }
+    raw.parse::<f64>().map(Value::Number).unwrap_or(Value::Null)
+}
+
+fn parse_array_items(raw: &str) -> Vec<Value> {
+    let mut items = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut depth = 0usize;
+    let chars = raw.char_indices().peekable();
+    for (index, ch) in chars {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let item = raw[start..index].trim();
+                if !item.is_empty() {
+                    items.push(parse_value(item));
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    let item = raw[start..].trim();
+    if !item.is_empty() {
+        items.push(parse_value(item));
+    }
+    items
+}
+
+fn is_string_literal(raw: &str) -> bool {
+    (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
+}
+
+fn encode_scope(ctx: &Ctx) -> String {
+    let pairs = ctx
+        .loop_params
+        .iter()
+        .filter_map(|param| {
+            ctx.locals
+                .get(param)
+                .map(|value| format!("\"{}\":{}", escape_json(param), value.to_json()))
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    percent_encode(&format!("{{{pairs}}}"))
+}
+
+impl Value {
+    fn to_json(&self) -> String {
+        match self {
+            Value::String(value) => format!("\"{}\"", escape_json(value)),
+            Value::Number(value) if value.fract() == 0.0 => format!("{}", *value as i64),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Array(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Value::to_json)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::Null => "null".into(),
+        }
+    }
+}
+
+fn escape_json(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn percent_encode(input: &str) -> String {
+    input
+        .bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
 }
 
 fn indent(input: &str, spaces: usize) -> String {
@@ -386,5 +712,103 @@ component App {
         let ir = build(&lower(program)).expect("ir");
         let html = generate(&ir);
         assert!(html.html.contains("l-style-card"));
+    }
+
+    #[test]
+    fn server_renders_initial_state_templates() {
+        let source = r#"
+component App {
+  state count: i32 = 7
+  state name: String = "Lume"
+
+  view {
+    Column {
+      Text("Count: {count}")
+      Input(value=name)
+      Image(src="/avatars/{name}.png", alt="{name}")
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate(&ir);
+        assert!(html.html.contains("Count: 7"));
+        assert!(html.html.contains("value=\"Lume\""));
+        assert!(html.html.contains("src=\"/avatars/Lume.png\" alt=\"Lume\""));
+    }
+
+    #[test]
+    fn server_renders_initial_if_and_for_branches() {
+        let source = r#"
+component App {
+  state count: i32 = 1
+  state items: Array = ["A", "B"]
+
+  view {
+    Column {
+      if count > 0 {
+        Text("Visible {count}")
+      } else {
+        Text("Hidden")
+      }
+
+      for item, index in items {
+        Button("Pick {item}") {
+          on click {
+            count += index
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate(&ir);
+        assert!(html.html.contains("Visible 1"));
+        assert!(!html.html.contains("Hidden"));
+        assert!(html.html.contains(">Pick A</button>"));
+        assert!(html.html.contains(">Pick B</button>"));
+        assert!(html
+            .html
+            .contains("data-lume-scope=\"%7B%22item%22%3A%22A%22%2C%22index%22%3A0%7D\""));
+        assert!(html
+            .html
+            .contains("data-lume-scope=\"%7B%22item%22%3A%22B%22%2C%22index%22%3A1%7D\""));
+    }
+
+    #[test]
+    fn server_renders_link_and_form_elements() {
+        let source = r#"
+server action save(message: String): String {
+  return message
+}
+
+component App {
+  view {
+    Column {
+      Link("Home", to="/")
+      Form action=save method="post" {
+        Input(name="message", label="Message", type="text")
+        Button("Save", type="submit")
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate(&ir);
+        assert!(html.html.contains("<a data-lume-id="));
+        assert!(html.html.contains("href=\"/\" data-lume-link=\"true\""));
+        assert!(html.html.contains("action=\"/__lume/actions/save\""));
+        assert!(html.html.contains("data-lume-form-action=\"save\""));
+        assert!(html.html.contains("name=\"message\""));
+        assert!(html.html.contains("type=\"submit\""));
     }
 }

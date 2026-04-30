@@ -3,5 +3,14 @@ name = "lume_runtime_server"
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+lume_ast = { path = "../lume_ast" }
+lume_backend_jit = { path = "../lume_backend_jit" }
+
+[dev-dependencies]
+lume_hir = { path = "../lume_hir" }
+lume_ir = { path = "../lume_ir" }
+lume_parser = { path = "../lume_parser" }
+
 [lib]
 path = "src/lib.rs"

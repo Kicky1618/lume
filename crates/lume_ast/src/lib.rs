@@ -18,8 +18,13 @@ pub enum Decl {
     Style(StyleDecl),
     Type(ReservedDecl),
     App(ReservedDecl),
-    ServerAction(ReservedDecl),
+    ServerAction(ServerActionDecl),
+    Query(QueryDecl),
     Form(ReservedDecl),
+    FfiModule(FfiModuleDecl),
+    FfiStruct(FfiStructDecl),
+    FfiEnum(FfiEnumDecl),
+    FfiOpaque(FfiOpaqueDecl),
     Ffi(ReservedDecl),
     Export(Box<Decl>),
     Reserved(ReservedDecl),
@@ -75,6 +80,77 @@ pub struct ActionDecl {
     pub params: Vec<Param>,
     pub body: Block,
     pub is_async: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerActionDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_ty: String,
+    pub modifiers: Vec<ServerModifier>,
+    pub body: Block,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerModifier {
+    pub name: String,
+    pub value: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct QueryDecl {
+    pub name: String,
+    pub key: Option<Expr>,
+    pub source: Expr,
+    pub is_server: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FfiModuleDecl {
+    pub name: String,
+    pub language: Option<String>,
+    pub library: Option<String>,
+    pub header: Option<String>,
+    pub sources: Vec<String>,
+    pub functions: Vec<FfiFunctionDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct FfiFunctionDecl {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_ty: String,
+    pub ownership: Option<String>,
+    pub callback: bool,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FfiStructDecl {
+    pub name: String,
+    pub fields: Vec<Param>,
+    pub repr: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FfiEnumDecl {
+    pub name: String,
+    pub variants: Vec<String>,
+    pub repr: Option<String>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FfiOpaqueDecl {
+    pub name: String,
+    pub ownership: Option<String>,
+    pub lifetime: Option<String>,
     pub span: Span,
 }
 
@@ -215,8 +291,23 @@ pub struct ThemeToken {
 #[derive(Clone, Debug)]
 pub struct RouteDecl {
     pub path: String,
-    pub view: Option<ViewBlock>,
+    pub attrs: Vec<RouteAttr>,
+    pub body: RouteBody,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RouteBody {
+    pub index: Option<ViewBlock>,
+    pub children: Vec<RouteDecl>,
+    pub view_nodes: Vec<ViewNode>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub enum RouteAttr {
+    Layout { name: String, span: Span },
+    Guard { expr: Expr, span: Span },
 }
 
 #[derive(Clone, Debug)]
