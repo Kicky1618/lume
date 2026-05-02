@@ -197,6 +197,9 @@ fn standard_component_symbols() -> HashSet<String> {
         "Link",
         "NavLink",
         "Outlet",
+        "Canvas",
+        "NativeCanvas",
+        "GpuCanvas",
         "Field",
         "VisuallyHidden",
         "FocusTrap",
@@ -213,7 +216,16 @@ fn is_standard_component(name: &str) -> bool {
 
 fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
     match module {
-        "lume/std/ui" => Some(&["Text", "Button", "Input", "Image", "Form", "Anchor"]),
+        "lume/std/ui" => Some(&[
+            "Text",
+            "Button",
+            "Input",
+            "Image",
+            "Form",
+            "Anchor",
+            "Canvas",
+            "NativeCanvas",
+        ]),
         "lume/std/layout" => Some(&["Box", "Row", "Column", "Grid", "Stack"]),
         "lume/std/router" => Some(&[
             "Link",
@@ -227,7 +239,16 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
         "lume/std/form" => Some(&["Form", "Field", "FormData", "validate"]),
         "lume/std/action" => Some(&["ActionResult", "ActionError"]),
         "lume/std/query" => Some(&["query", "invalidate"]),
-        "lume/std/ffi" => Some(&["Owned", "Borrowed", "View", "Handle", "Ptr", "StatusCode"]),
+        "lume/std/ffi" => Some(&[
+            "Owned",
+            "Borrowed",
+            "View",
+            "Handle",
+            "Ptr",
+            "StatusCode",
+            "CanvasSurface",
+        ]),
+        "lume/std/gpu" => Some(&["GpuCanvas", "gpu"]),
         "lume/std/a11y" => Some(&["VisuallyHidden", "FocusTrap", "Landmark"]),
         "lume/std/i18n" => Some(&["t", "locale"]),
         _ => None,

@@ -2,12 +2,53 @@ use lume_span::{SourceFile, SourceMap};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildTarget {
+    HtmlJsCss,
+    HtmlJsCssWasm,
+}
+
+impl BuildTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HtmlJsCss => "html-js-css",
+            Self::HtmlJsCssWasm => "html-js-css-wasm",
+        }
+    }
+
+    pub fn wasm_enabled(self) -> bool {
+        matches!(self, Self::HtmlJsCssWasm)
+    }
+}
+
+impl Default for BuildTarget {
+    fn default() -> Self {
+        Self::HtmlJsCssWasm
+    }
+}
+
+impl FromStr for BuildTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "html-js-css" => Ok(Self::HtmlJsCss),
+            "html-js-css-wasm" => Ok(Self::HtmlJsCssWasm),
+            other => Err(format!(
+                "unknown build target `{other}`; expected `html-js-css` or `html-js-css-wasm`"
+            )),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct BuildOptions {
     pub project_name: String,
     pub entry: PathBuf,
     pub out_dir: PathBuf,
+    pub target: BuildTarget,
 }
 
 impl Default for BuildOptions {
@@ -16,13 +57,21 @@ impl Default for BuildOptions {
             project_name: "lume-app".into(),
             entry: PathBuf::from("src/app.lume"),
             out_dir: PathBuf::from("dist"),
+            target: BuildTarget::default(),
         }
     }
 }
 
 impl BuildOptions {
-    pub fn from_args(entry: Option<PathBuf>, out_dir: Option<PathBuf>) -> io::Result<Self> {
-        let mut options = if Path::new("lume.toml").exists() {
+    pub fn from_args(
+        entry: Option<PathBuf>,
+        out_dir: Option<PathBuf>,
+        target: Option<BuildTarget>,
+        config: Option<PathBuf>,
+    ) -> io::Result<Self> {
+        let mut options = if let Some(config) = config {
+            Self::from_toml_file(config)?
+        } else if Path::new("lume.toml").exists() {
             Self::from_toml_file("lume.toml")?
         } else {
             Self::default()
@@ -33,15 +82,24 @@ impl BuildOptions {
         if let Some(out_dir) = out_dir {
             options.out_dir = out_dir;
         }
+        if let Some(target) = target {
+            options.target = target;
+        }
         Ok(options)
     }
 
     pub fn from_toml_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let text = fs::read_to_string(path)?;
         let mut options = Self::default();
+        let mut section = String::new();
+        let mut explicit_build_target = false;
         for line in text.lines() {
             let line = line.trim();
-            if line.starts_with('#') || line.starts_with('[') || line.is_empty() {
+            if line.starts_with('#') || line.is_empty() {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                section = line.trim_matches(['[', ']']).to_string();
                 continue;
             }
             let Some((key, value)) = line.split_once('=') else {
@@ -49,15 +107,34 @@ impl BuildOptions {
             };
             let key = key.trim();
             let value = value.trim().trim_matches('"');
-            match key {
-                "name" => options.project_name = value.into(),
-                "entry" => options.entry = PathBuf::from(value),
-                "out_dir" => options.out_dir = PathBuf::from(value),
+            match (section.as_str(), key) {
+                ("project" | "", "name") => options.project_name = value.into(),
+                ("project" | "", "entry") => options.entry = PathBuf::from(value),
+                ("project" | "", "out_dir") => options.out_dir = PathBuf::from(value),
+                ("build" | "", "target") => {
+                    options.target = value.parse().map_err(invalid_data)?;
+                    explicit_build_target = true;
+                }
+                ("wasm", "enabled") if !explicit_build_target => {
+                    options.target = match value {
+                        "true" => BuildTarget::HtmlJsCssWasm,
+                        "false" => BuildTarget::HtmlJsCss,
+                        other => {
+                            return Err(invalid_data(format!(
+                                "invalid wasm.enabled value `{other}`; expected true or false"
+                            )))
+                        }
+                    };
+                }
                 _ => {}
             }
         }
         Ok(options)
     }
+}
+
+fn invalid_data(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -71,5 +148,29 @@ impl Session {
         let source = fs::read_to_string(&path)?;
         let id = self.source_map.add_file(path.clone(), source.clone());
         Ok(SourceFile { id, path, source })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildOptions, BuildTarget};
+    use std::fs;
+
+    #[test]
+    fn parses_build_target_without_confusing_wasm_target_triple() {
+        let path =
+            std::env::temp_dir().join(format!("lume-session-target-{}.toml", std::process::id()));
+        fs::write(
+            &path,
+            "[project]\nname = \"demo\"\nentry = \"src/main.lume\"\nout_dir = \"public\"\n\n[build]\ntarget = \"html-js-css-wasm\"\n\n[wasm]\ntarget = \"wasm32-unknown-unknown\"\n",
+        )
+        .expect("write config");
+
+        let options = BuildOptions::from_toml_file(&path).expect("parse config");
+        fs::remove_file(path).ok();
+
+        assert_eq!(options.project_name, "demo");
+        assert_eq!(options.target, BuildTarget::HtmlJsCssWasm);
+        assert!(options.target.wasm_enabled());
     }
 }

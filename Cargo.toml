@@ -33,4 +33,4 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-inkwell = { version = "0.8", features = ["llvm21-1"] }
+inkwell = { version = "0.8", features = ["llvm21-1", "target-webassembly"] }

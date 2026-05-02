@@ -1,6 +1,11 @@
 #include "renderkit.h"
 
 #include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <limits.h>
 
 int canvas_create(Vec2 size, Canvas **out_canvas)
 {

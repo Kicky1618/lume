@@ -62,34 +62,43 @@ pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
                 Ok(ir) => {
                     let html = lume_codegen_html::generate(&ir);
                     let css = lume_codegen_css::generate(&ir);
-                    let js = lume_codegen_js::generate(&ir, &html);
+                    let js = lume_codegen_js::generate_with_wasm(
+                        &ir,
+                        &html,
+                        options.target.wasm_enabled(),
+                    );
                     write_dist(&options, &ir, &html.html, &css, &js)?;
-                    return Ok(BuildResult {
-                        diagnostics: diagnostics.into_vec(),
-                        emitted: vec![
-                            options.out_dir.join("index.html").display().to_string(),
-                            options.out_dir.join("assets/app.js").display().to_string(),
-                            options
-                                .out_dir
-                                .join("assets/style.css")
-                                .display()
-                                .to_string(),
-                            options
-                                .out_dir
-                                .join("assets/lume.manifest.json")
-                                .display()
-                                .to_string(),
+                    let mut emitted = vec![
+                        options.out_dir.join("index.html").display().to_string(),
+                        options.out_dir.join("assets/app.js").display().to_string(),
+                        options
+                            .out_dir
+                            .join("assets/style.css")
+                            .display()
+                            .to_string(),
+                        options
+                            .out_dir
+                            .join("assets/lume.manifest.json")
+                            .display()
+                            .to_string(),
+                        options
+                            .out_dir
+                            .join("assets/lume.backend.json")
+                            .display()
+                            .to_string(),
+                    ];
+                    if options.target.wasm_enabled() {
+                        emitted.push(
                             options
                                 .out_dir
                                 .join("assets/app.wasm")
                                 .display()
                                 .to_string(),
-                            options
-                                .out_dir
-                                .join("assets/lume.backend.json")
-                                .display()
-                                .to_string(),
-                        ],
+                        );
+                    }
+                    return Ok(BuildResult {
+                        diagnostics: diagnostics.into_vec(),
+                        emitted,
                     });
                 }
                 Err(more) => diagnostics.extend(more.into_vec()),
@@ -146,7 +155,7 @@ pub fn init() -> io::Result<()> {
     if !Path::new("lume.toml").exists() {
         fs::write(
             "lume.toml",
-            "[project]\nname = \"lume-app\"\nentry = \"src/app.lume\"\nout_dir = \"dist\"\n",
+            "[project]\nname = \"lume-app\"\nentry = \"src/app.lume\"\nout_dir = \"dist\"\n\n[build]\ntarget = \"html-js-css-wasm\"\n",
         )?;
     }
     if !Path::new("src/app.lume").exists() {
@@ -983,12 +992,30 @@ fn write_dist(
     fs::write(options.out_dir.join("index.html"), html)?;
     fs::write(assets.join("style.css"), css)?;
     fs::write(assets.join("app.js"), js)?;
+    if options.target.wasm_enabled() {
+        let wasm = match lume_codegen_wasm::WasmBackend::new().emit(ir) {
+            Ok(artifact) => artifact.wasm,
+            Err(err) => {
+                eprintln!(
+                    "lume build: LLVM WASM generation failed, using fallback skeleton: {err}"
+                );
+                lume_codegen_wasm::WasmBackend::new()
+                    .emit_skeleton()
+                    .to_vec()
+            }
+        };
+        fs::write(assets.join("app.wasm"), wasm)?;
+    } else {
+        let stale_wasm = assets.join("app.wasm");
+        if stale_wasm.exists() {
+            fs::remove_file(stale_wasm)?;
+        }
+    }
+    fs::write(assets.join("lume.manifest.json"), manifest(ir, options))?;
     fs::write(
-        assets.join("app.wasm"),
-        lume_codegen_wasm::WasmBackend::new().emit_skeleton(),
+        assets.join("lume.backend.json"),
+        backend_manifest(ir, options),
     )?;
-    fs::write(assets.join("lume.manifest.json"), manifest(ir))?;
-    fs::write(assets.join("lume.backend.json"), backend_manifest(ir))?;
     Ok(())
 }
 
@@ -1065,7 +1092,7 @@ fn c_compiler_for(language: Option<&str>) -> &'static str {
     }
 }
 
-fn manifest(ir: &lume_ir::LumeProgram) -> String {
+fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
     let states = ir
         .states()
         .map(|state| {
@@ -1344,8 +1371,10 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"html-js-css\",\n  \"backends\": [\"ssr\", \"wasm\", \"native\", \"jit\"],\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
         json_escape(&ir.component.name),
+        options.target.as_str(),
+        backend_list(options),
         states,
         routes,
         route_tree,
@@ -1360,7 +1389,7 @@ fn manifest(ir: &lume_ir::LumeProgram) -> String {
     )
 }
 
-fn backend_manifest(ir: &lume_ir::LumeProgram) -> String {
+fn backend_manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
     let ffi_registry = lume_ffi::FfiRegistry::from_ast(
         &ir.ffi_modules,
         &ir.ffi_structs,
@@ -1390,8 +1419,24 @@ fn backend_manifest(ir: &lume_ir::LumeProgram) -> String {
             format!("{{ \"modules\": [], \"errors\": [{}] }}", errors)
         });
     format!(
-        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {} }},\n  \"wasm\": {{ \"enabled\": true, \"entry\": \"assets/app.wasm\", \"abi\": [\"lume_init\", \"lume_dispatch\", \"lume_free\"] }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {}, \"bridge\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
+        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {} }},\n  \"wasm\": {{ \"enabled\": {}, \"entry\": {}, \"target\": {}, \"abi\": {} }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {}, \"bridge\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
         ir.routes.len(),
+        options.target.wasm_enabled(),
+        if options.target.wasm_enabled() {
+            "\"assets/app.wasm\""
+        } else {
+            "null"
+        },
+        if options.target.wasm_enabled() {
+            "\"wasm32-unknown-unknown\""
+        } else {
+            "null"
+        },
+        if options.target.wasm_enabled() {
+            "[\"lume_init\", \"lume_dispatch\", \"lume_get_patch_len\", \"lume_alloc\", \"lume_free\"]"
+        } else {
+            "[]"
+        },
         ir.server_actions.len(),
         ir.ffi_modules.len(),
         native_bridge,
@@ -1410,6 +1455,14 @@ fn backend_manifest(ir: &lume_ir::LumeProgram) -> String {
             })
             .count()
     )
+}
+
+fn backend_list(options: &BuildOptions) -> &'static str {
+    if options.target.wasm_enabled() {
+        "[\"ssr\", \"wasm\", \"native\", \"jit\"]"
+    } else {
+        "[\"ssr\", \"native\", \"jit\"]"
+    }
 }
 
 fn route_node_json(node: &lume_ir::IrRouteNode, indent: usize) -> String {

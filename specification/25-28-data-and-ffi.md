@@ -1,5 +1,7 @@
 ## 25. データ取得
 
+現行実装では `query` の client cache と `server action` からの簡易 invalidation は実装済みで、`mutation`、`stream`、`validation DSL` は [未実装] とみなす。
+
 ### 25.1 query
 
 ```lume
@@ -15,7 +17,7 @@ data: T?
 refetch(): Void
 ```
 
-### 25.2 mutation
+### 25.2 mutation [未実装]
 
 ```lume
 mutation saveUser = api.post("/users")
@@ -38,6 +40,8 @@ query user key=["user", id] = api.get("/users/{id}")
 ```
 
 HTML + JS 出力では、`query` は Lume client runtime の fetch/cache 層へ変換される。HTML + JS + WASM 出力では、cache key 計算や response validation を WASM 側に置ける。
+
+実装では `query key` は `JSON.stringify` ベースの簡易 cache key として扱う。`server query` は AST / manifest 上に残るが、専用の実行路はまだない。
 
 ---
 
@@ -210,7 +214,7 @@ JavaScript が無効な環境でも、通常の POST として動作できるタ
 
 ---
 
-### 26.6 validation
+### 26.6 validation [未実装]
 
 Server Action には入力検証を指定できる。
 
@@ -240,7 +244,7 @@ type ActionError = {
 
 ---
 
-### 26.7 result 型
+### 26.7 result 型 [未実装]
 
 Server Action は例外を投げる形式と `Result<T, E>` 形式の両方をサポートする。
 
@@ -309,6 +313,8 @@ server action updatePost(id: String, input: UpdatePostInput): Post
 }
 ```
 
+実装では `auth required` 相当の強制認証と、`auth optional` の緩和までは扱う。`role=`、`can=` の細かな権限分岐は [未実装]。
+
 ---
 
 ### 26.9 CSRF
@@ -337,7 +343,7 @@ server action webhook(input: WebhookPayload): Void
 
 ---
 
-### 26.10 rate limit
+### 26.10 rate limit [一部実装]
 
 ```lume
 server action sendMessage(input: MessageInput): Message
@@ -361,9 +367,11 @@ h
 d
 ```
 
+実装では `rateLimit` の存在は判定するが、`key` / `limit` / `window` の細かな指定はまだ runtime に降りていない。
+
 ---
 
-### 26.11 transaction
+### 26.11 transaction [未実装]
 
 ```lume
 server action transfer(input: TransferInput): Void
@@ -388,7 +396,7 @@ server action createOrder(input: OrderInput): Order
 
 ---
 
-### 26.12 runtime
+### 26.12 runtime [一部実装]
 
 Server Action の実行環境を指定できる。
 
@@ -421,9 +429,11 @@ jit
 
 FFI を使用する Server Action は原則 `native` を要求する。JIT から FFI を使う場合は、FFI symbol table の lazy resolution と安全性診断を必須にする。
 
+実装では `native` と `jit` の宣言は manifest に反映されるが、`jit` の実行は現状 i64 系の簡易 action に限定される。
+
 ---
 
-### 26.13 streaming
+### 26.13 streaming [未実装]
 
 Server Action は stream を返せる。
 
@@ -447,7 +457,7 @@ HTTP 出力では SSE / fetch streaming / WebSocket のいずれかへ変換で�
 
 ---
 
-### 26.14 redirect / revalidate
+### 26.14 redirect / revalidate [一部実装]
 
 ```lume
 server action createPost(input: CreatePostInput): Void {
@@ -458,6 +468,8 @@ server action createPost(input: CreatePostInput): Void {
 ```
 
 `redirect` は action の実行を終了する制御フローとして扱う。
+
+実装では `revalidate(...)` / `invalidates` は `revalidate` 配列として返却できるが、`redirect` の制御フローはまだない。
 
 ---
 
@@ -481,9 +493,11 @@ invalidates [
 ]
 ```
 
+この項目は manifest には出るが、クライアント runtime 側の一般化された cache invalidation は [未実装] で、現状は server action 呼び出し時の簡易 invalidation に留まる。
+
 ---
 
-### 26.16 ファイルアップロード
+### 26.16 ファイルアップロード [未実装]
 
 ```lume
 server action uploadAvatar(file: File): URL
@@ -504,6 +518,8 @@ server action uploadImages(files: File[]): URL[]
 }
 ```
 
+実装では `maxBodySize` のサイズ制限はあるが、multipart / File binding の本格的なアップロード処理は [未実装]。
+
 ---
 
 ### 26.17 Server Action のコンパイルモデル
@@ -517,6 +533,8 @@ type schema
 transport binding
 runtime manifest
 ```
+
+実装では `lume.manifest.json` に加えて `lume.backend.json` を生成し、`actions`、`runtime`、`csrf`、`invalidates`、`maxBodySize`、`rateLimit`、`transaction` を運搬する。
 
 例。
 
@@ -561,6 +579,8 @@ registerServerAction("add", async (a, b) => a + b)
   ]
 }
 ```
+
+現行の manifest では、各 action に `id`、`runtime`、`auth`、`csrf`、`input`、`output`、`invalidates`、`maxBodySize`、`rateLimit`、`transaction` を含める。
 
 ---
 
@@ -624,9 +644,11 @@ server action compute(x: Float): Float
 }
 ```
 
+実装では `language`、`library`、`header`、`sources`、`runtime`、`safe` / `unsafe`、`threadSafe`、`lock`、`fn`、`free`、`throws`、`callback` を受ける。`namespace`、`abi`、`out` パラメータ構文は [未実装]。
+
 ---
 
-### 27.3 C++ module
+### 27.3 C++ module [未実装]
 
 ```lume
 ffi module imagecodec {
@@ -646,7 +668,7 @@ C++ ABI はコンパイラや標準ライブラリ差異の影響を受けやす
 
 ---
 
-### 27.4 C ABI 推奨形式
+### 27.4 C ABI 推奨形式 [未実装]
 
 ```cpp
 extern "C" {
@@ -725,6 +747,8 @@ File     -> Bytes / Stream<Bytes>
 ```
 
 `Int` を FFI 境界で使う場合は警告する。
+
+実装では `Ptr<T>`、`ConstPtr<T>`、`Borrowed<T>`、`Owned<T>`、`View<T>`、`Handle<T>`、`Struct<T>`、`Opaque<T>`、`cstring`、`Utf8String`、`Utf16String`、`Bytes` を扱う。`namespace` 付き C++ ABI やプラットフォーム別条件分岐は [未実装]。
 
 ```lume
 fn add(a: Int, b: Int): Int // warning: use i32 or i64 at FFI boundary
@@ -1104,7 +1128,7 @@ ffi module codec {
 
 ---
 
-### 27.21 platform 条件
+### 27.21 platform 条件 [未実装]
 
 ```lume
 ffi module nativehash {
@@ -1224,6 +1248,8 @@ component QrButton {
 }
 ```
 
+実際の `lume.manifest.json` には `ffi`、`ffiStructs`、`ffiEnums`、`ffiOpaques` が別配列で出力される。`lume.backend.json` には native bridge の解決結果とエラー一覧が入る。
+
 ---
 
 ### 27.25 FFI バックエンド
@@ -1329,4 +1355,3 @@ Form bind=signup {
 ```
 
 ---
-

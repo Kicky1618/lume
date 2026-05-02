@@ -1,3 +1,70 @@
+theme default {
+  color bg = "#07111f"
+  color surface = "#0f172a"
+  color surfaceAlt = "#111c33"
+  color surfaceSoft = "#16233d"
+  color ink = "#e2ecfb"
+  color muted = "#93a4c7"
+  color accent = "#7dd3fc"
+  color warm = "#fbbf24"
+
+  space sm = 10
+  space md = 16
+  space lg = 24
+  space xl = 32
+
+  radius md = 16
+  radius lg = 24
+}
+
+style shell {
+  minHeight: 100vh
+  padding: 32
+  background: bg
+  color: ink
+}
+
+style content {
+  maxWidth: 1240
+  margin: 0 auto
+}
+
+style heroPanel {
+  padding: 28
+  background: surfaceSoft
+  radius: lg
+}
+
+style chip {
+  padding: 8
+  background: surfaceAlt
+  radius: 999
+}
+
+style metricCard {
+  padding: 16
+  background: surfaceAlt
+  radius: md
+}
+
+style panel {
+  padding: 20
+  background: surface
+  radius: lg
+}
+
+style canvasCard {
+  padding: 20
+  background: surfaceSoft
+  radius: lg
+}
+
+style stateCard {
+  padding: 20
+  background: surfaceAlt
+  radius: lg
+}
+
 ffi struct Vec2 {
   x: f32,
   y: f32
@@ -73,157 +140,342 @@ component App {
   state maxIterations: i64 = 220
   state status: String = "idle"
   state budget: i64 = 0
-  state manifestNote: String = "MandelbrotSet is drawn in the UI and mirrored by the native FFI function mandelbrot_render."
+  state manifestNote: String = "Canvas is painted by native FFI and framed by the UI."
   state result: String = ""
 
+  action panLeft {
+    centerX -= 12 / scale
+  }
+
+  action panRight {
+    centerX += 12 / scale
+  }
+
+  action panUp {
+    centerY -= 12 / scale
+  }
+
+  action panDown {
+    centerY += 12 / scale
+  }
+
+  action zoomIn {
+    scale += 15
+  }
+
+  action zoomOut {
+    scale -= 15
+  }
+
+  action addDetail {
+    maxIterations += 20
+  }
+
+  action reduceDetail {
+    maxIterations -= 20
+  }
+
+  action resetViewport {
+    centerX = -0.743643887
+    centerY = 0.131825904
+    scale = 85.0
+    maxIterations = 220
+  }
+
   view {
-    Column gap=16 padding=20 {
-      Text("FFI Lab")
-      Text("A working console for FFI declarations, native action planning, and JIT math.")
+    Box style=shell {
+      Box style=content {
+        Column gap=24 {
+          Box style=heroPanel {
+            Column gap=18 {
+              Row gap=8 {
+                Box style=chip {
+                  Text("ffi-lab", size=12, weight=700, color=accent)
+                }
 
-      Row gap=16 {
-        Box padding=16 {
-          Column gap=10 {
-            Text("Render request")
+                Box style=chip {
+                  Text("native bridge", size=12, weight=700, color=muted)
+                }
 
-            Input(value=prompt, label="Prompt", placeholder="Describe the frame") {
-              on input(value) {
-                prompt = value
-              }
-            }
-
-            Input(value=format, label="Format", placeholder="png / jpeg / webp") {
-              on input(value) {
-                format = value
-              }
-            }
-
-            Row gap=8 {
-              Button("- Width") {
-                on click {
-                  width -= 64
+                Box style=chip {
+                  Text("jit budget", size=12, weight=700, color=muted)
                 }
               }
 
-              Button("+ Width") {
-                on click {
-                  width += 64
+              Column gap=10 {
+                Text("FFI Lab", as="h1", size=44, weight=800, color=ink)
+                Text("An intentional console for FFI declarations, native job planning, and a Canvas-backed Mandelbrot viewport.", size=16, color=muted)
+              }
+
+              Grid columns=4 gap=12 {
+                Box style=metricCard {
+                  Column gap=6 {
+                    Text("Budget", size=12, weight=700, color=muted)
+                    Text("{budget}", size=24, weight=800, color=accent)
+                  }
                 }
-              }
-            }
 
-            Row gap=8 {
-              Button("- Height") {
-                on click {
-                  height -= 36
+                Box style=metricCard {
+                  Column gap=6 {
+                    Text("Status", size=12, weight=700, color=muted)
+                    Text("{status}", size=18, weight=800, color=ink)
+                  }
                 }
-              }
 
-              Button("+ Height") {
-                on click {
-                  height += 36
+                Box style=metricCard {
+                  Column gap=6 {
+                    Text("Scale", size=12, weight=700, color=muted)
+                    Text("{scale}", size=18, weight=800, color=warm)
+                  }
                 }
-              }
-            }
 
-            Row gap=8 {
-              Button("- Quality") {
-                on click {
-                  quality -= 1
+                Box style=metricCard {
+                  Column gap=6 {
+                    Text("Iterations", size=12, weight=700, color=muted)
+                    Text("{maxIterations}", size=18, weight=800, color=ink)
+                  }
                 }
-              }
-
-              Button("+ Quality") {
-                on click {
-                  quality += 1
-                }
-              }
-            }
-
-            Row gap=8 {
-              Button("Zoom out") {
-                on click {
-                  scale = scale / 1.6
-                }
-              }
-
-              Button("Zoom in") {
-                on click {
-                  scale = scale * 1.6
-                }
-              }
-            }
-
-            Row gap=8 {
-              Button("- Iterations") {
-                on click {
-                  maxIterations -= 20
-                }
-              }
-
-              Button("+ Iterations") {
-                on click {
-                  maxIterations += 20
-                }
-              }
-            }
-
-            Button("Estimate budget") {
-              on click {
-                budget = await estimateBudget(width, height)
-              }
-            }
-
-            Button("Prepare native job") {
-              on click {
-                result = await prepareRender(prompt, width, height)
-                status = result
               }
             }
           }
-        }
 
-        Box padding=16 {
-          Column gap=10 {
-            Text("FFI inventory")
-            Text("structs: Vec2, Rgba")
-            Text("enum: ImageFormat")
-            Text("opaques: Canvas, Decoder")
-            Text("module: renderkit")
-            Text("native symbol: mandelbrot_render")
-            Text("callback: onProgress")
-            Text("ownership: borrowed / owned / lifetime")
-            Text("backend: native bridge + manifest")
+          Grid columns=2 gap=18 {
+            Box style=panel {
+              Column gap=14 {
+                Text("Render controls", size=14, weight=700, color=accent)
+                Text("Prompt, format, and canvas size stay together so the request reads like one scene.", size=15, color=muted)
+
+                Input(value=prompt, label="Prompt", placeholder="Describe the frame") {
+                  on input(value) {
+                    prompt = value
+                  }
+                }
+
+                Input(value=format, label="Format", placeholder="png / jpeg / webp") {
+                  on input(value) {
+                    format = value
+                  }
+                }
+
+                Column gap=10 {
+                  Text("Canvas size", size=12, weight=700, color=muted)
+
+                  Row gap=8 {
+                    Button("- Width") {
+                      on click {
+                        width -= 64
+                      }
+                    }
+
+                    Button("+ Width") {
+                      on click {
+                        width += 64
+                      }
+                    }
+                  }
+
+                  Row gap=8 {
+                    Button("- Height") {
+                      on click {
+                        height -= 36
+                      }
+                    }
+
+                    Button("+ Height") {
+                      on click {
+                        height += 36
+                      }
+                    }
+                  }
+                }
+
+                Column gap=10 {
+                  Text("Render budget", size=12, weight=700, color=muted)
+
+                  Row gap=8 {
+                    Button("- Quality") {
+                      on click {
+                        quality -= 1
+                      }
+                    }
+
+                    Button("+ Quality") {
+                      on click {
+                        quality += 1
+                      }
+                    }
+                  }
+
+                  Row gap=8 {
+                    Button("- Iterations") {
+                      on click {
+                        reduceDetail()
+                      }
+                    }
+
+                    Button("+ Iterations") {
+                      on click {
+                        addDetail()
+                      }
+                    }
+                  }
+                }
+
+                Row gap=12 {
+                  Button("Estimate budget") {
+                    on click {
+                      budget = await estimateBudget(width, height)
+                    }
+                  }
+
+                  Button("Prepare native job", variant="primary") {
+                    on click {
+                      result = await prepareRender(prompt, width, height)
+                      status = result
+                    }
+                  }
+                }
+
+                Text("Budget is computed locally; the native bridge only takes the final request.", size=14, color=muted)
+              }
+            }
+
+            Box style=panel {
+              Column gap=14 {
+                Text("FFI inventory", size=14, weight=700, color=accent)
+                Text("structs: Vec2, Rgba", size=15, color=ink)
+                Text("enum: ImageFormat", size=15, color=ink)
+                Text("opaques: Canvas, Decoder", size=15, color=ink)
+                Text("module: renderkit", size=15, color=ink)
+                Text("native symbol: mandelbrot_render", size=15, color=ink)
+                Text("callback: onProgress", size=15, color=ink)
+                Text("ownership: borrowed / owned / lifetime", size=15, color=muted)
+                Text("backend: native bridge + manifest", size=15, color=muted)
+
+                Row gap=8 {
+                  Box style=chip {
+                    Text("borrowed", size=12, weight=700, color=accent)
+                  }
+
+                  Box style=chip {
+                    Text("owned", size=12, weight=700, color=muted)
+                  }
+
+                  Box style=chip {
+                    Text("lifetime", size=12, weight=700, color=muted)
+                  }
+                }
+              }
+            }
           }
-        }
-      }
 
-      MandelbrotSet(
-        width=width,
-        height=height,
-        centerX=centerX,
-        centerY=centerY,
-        scale=scale,
-        maxIterations=maxIterations
-      )
+          Box style=canvasCard {
+            Column gap=14 {
+              Row gap=8 {
+                Text("Viewport", size=14, weight=700, color=accent)
+                Text("native Mandelbrot render", size=14, color=muted)
+              }
 
-      Box padding=16 {
-        Column gap=10 {
-          Text("Execution state")
-          Text("Prompt: {prompt}")
-          Text("Canvas: {width} x {height}")
-          Text("Format: {format}")
-          Text("Quality: {quality}")
-          Text("Mandelbrot center: {centerX}, {centerY}")
-          Text("Mandelbrot scale: {scale}")
-          Text("Mandelbrot iterations: {maxIterations}")
-          Text("Budget: {budget}")
-          Text("Status: {status}")
-          Text("{manifestNote}")
-          if result != "" {
-            Text("Last result: {result}")
-          } else {
-            Text("Last result: none")
+              Text("The image is painted in native code; the UI frames it with status and controls.", size=15, color=muted)
+
+              NativeCanvas(
+                renderer=renderkit.mandelbrot_render,
+                width=width,
+                height=height,
+                ariaLabel="Native Mandelbrot viewport",
+                args={
+                  width: width,
+                  height: height,
+                  max_iterations: maxIterations,
+                  center_x: centerX,
+                  center_y: centerY,
+                  scale: scale
+                },
+                fallback="cpu"
+              )
+
+              Row gap=8 {
+                Button("Left") {
+                  on click {
+                    panLeft()
+                  }
+                }
+
+                Button("Right") {
+                  on click {
+                    panRight()
+                  }
+                }
+
+                Button("Up") {
+                  on click {
+                    panUp()
+                  }
+                }
+
+                Button("Down") {
+                  on click {
+                    panDown()
+                  }
+                }
+              }
+
+              Row gap=8 {
+                Button("Zoom in") {
+                  on click {
+                    zoomIn()
+                  }
+                }
+
+                Button("Zoom out") {
+                  on click {
+                    zoomOut()
+                  }
+                }
+
+                Button("Reset viewport") {
+                  on click {
+                    resetViewport()
+                  }
+                }
+              }
+
+              Row gap=8 {
+                Box style=chip {
+                  Text("center {centerX}, {centerY}", size=12, weight=700, color=accent)
+                }
+
+                Box style=chip {
+                  Text("scale {scale}", size=12, weight=700, color=muted)
+                }
+
+                Box style=chip {
+                  Text("iterations {maxIterations}", size=12, weight=700, color=muted)
+                }
+              }
+            }
+          }
+
+          Box style=stateCard {
+            Column gap=10 {
+              Text("Execution state", size=14, weight=700, color=accent)
+              Text("Prompt: {prompt}", size=15, color=ink)
+              Text("Canvas: {width} x {height}", size=15, color=ink)
+              Text("Format: {format}", size=15, color=ink)
+              Text("Quality: {quality}", size=15, color=ink)
+              Text("Mandelbrot center: {centerX}, {centerY}", size=15, color=ink)
+              Text("Mandelbrot scale: {scale}", size=15, color=ink)
+              Text("Mandelbrot iterations: {maxIterations}", size=15, color=ink)
+              Text("Budget: {budget}", size=15, color=ink)
+              Text("Status: {status}", size=15, color=ink)
+              Text("{manifestNote}", size=14, color=muted)
+
+              if result != "" {
+                Text("Last result: {result}", size=15, color=warm)
+              } else {
+                Text("Last result: none", size=15, color=muted)
+              }
+            }
           }
         }
       }

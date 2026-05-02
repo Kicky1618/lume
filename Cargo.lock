@@ -150,6 +150,12 @@ dependencies = [
 [[package]]
 name = "lume_codegen_wasm"
 version = "0.2.0"
+dependencies = [
+ "inkwell",
+ "lume_hir",
+ "lume_ir",
+ "lume_parser",
+]
 
 [[package]]
 name = "lume_diagnostics"

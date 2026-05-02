@@ -378,9 +378,8 @@ impl Parser {
             Vec::new()
         };
         self.expect_symbol(':');
-        let return_ty = self.collect_raw_until(&[
-            "}", "fn", "ownership", "free", "throws", "callback",
-        ]);
+        let return_ty =
+            self.collect_raw_until(&["}", "fn", "ownership", "free", "throws", "callback"]);
         let mut ownership = None;
         let mut free = None;
         let mut throws = None;
@@ -1041,8 +1040,12 @@ impl Parser {
                 break;
             }
             match &self.current().kind {
-                TokenKind::Symbol('(') | TokenKind::Symbol('[') => depth += 1,
-                TokenKind::Symbol(')') | TokenKind::Symbol(']') => depth = depth.saturating_sub(1),
+                TokenKind::Symbol('(') | TokenKind::Symbol('[') | TokenKind::Symbol('{') => {
+                    depth += 1
+                }
+                TokenKind::Symbol(')') | TokenKind::Symbol(']') | TokenKind::Symbol('}') => {
+                    depth = depth.saturating_sub(1)
+                }
                 _ => {}
             }
             if !raw.is_empty() && needs_space(&raw, self.current()) {

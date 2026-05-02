@@ -11,6 +11,8 @@ DSL には以下を含む。
 
 最終出力は常に CSS であり、DSL 固有機能はコンパイル時に CSS へ変換される。
 
+実装状況としては、`style` 宣言、`theme` 宣言、`hover` / `active` / `disabled` の state style、`at sm|md|lg|xl` の responsive ブロック、`style=` 参照、基本的なトークン参照までは実装済みである。`inline style` ブロックや、より高度な semantic prop / cascade 制御は [未実装] として扱う。
+
 ### 19.1 インライン style
 
 ```lume
@@ -289,6 +291,102 @@ Form {
 }
 ```
 
+実装では `Form action=save method="post"` のような Server Action 直結フォームも扱う。`action` が相対 URL であれば通常の `<form action="...">` として、識別子であれば `"/__lume/actions/<name>"` へ変換する。
+
+### 22.7 Canvas
+
+`Canvas` は描画命令を書くための API ではなく、描画結果を表示するための surface である。
+
+`Canvas` 自体は renderer を持たない。通常の UI tree の中に `<canvas>` 相当の描画領域を確保するだけである。
+
+```lume
+Canvas(
+  width=800,
+  height=600,
+  ariaLabel="Preview"
+)
+```
+
+`Canvas` は width / height / ariaLabel / class / style などの表示属性のみを受け取る。native bridge、WebGPU、WASM、CPU renderer への接続は `Canvas` ではなく、専用の派生要素で扱う。
+
+#### 22.7.1 NativeCanvas
+
+`NativeCanvas` は `CanvasSurface` を C / C++ FFI または native backend の描画関数へ渡すための要素である。
+
+```lume
+ffi module renderkit {
+  language "c"
+  sources ["./native/mandelbrot.c"]
+
+  extern fn mandelbrot_render(
+    surface: CanvasSurface,
+    width: i32,
+    height: i32,
+    scale: f64
+  ): StatusCode
+}
+
+component MandelbrotView() {
+  state scale: f64 = 1.0
+
+  view {
+    NativeCanvas(
+      width=800,
+      height=600,
+      renderer=renderkit.mandelbrot_render,
+      args={
+        width: 800,
+        height: 600,
+        scale
+      },
+      fallback="cpu"
+    )
+  }
+}
+```
+
+`renderer` は `CanvasSurface` を第一引数に取る関数でなければならない。
+
+`args` は文字列ではなく構造化された引数 object とし、各値は FFI 関数の型に対してコンパイル時に検査する。
+
+`args` に含まれる state / props が変化した場合、runtime は対象 `NativeCanvas` の再描画をスケジュールする。
+
+`CanvasSurface` は Lume runtime が所有する不透明型である。ユーザーコードは `CanvasSurface` を保存してはならない。描画関数の呼び出し中だけ有効な borrowed handle として扱う。
+
+旧形式の `nativeModule`、`nativeSymbol`、`nativeArgs` は非推奨とする。`data-lume-native-*` 属性は runtime の内部表現であり、Lume ソース上の public API ではない。
+
+#### 22.7.2 GpuCanvas
+
+`GpuCanvas` は `lume/std/gpu` の GPU graph を表示先 surface に接続するための要素である。
+
+WebGPU は最初の実装 target とする。ただし、Lume ソース上では WebGPU API を直接公開しない。
+
+```lume
+import { GpuCanvas } from "lume/std/gpu"
+
+GpuCanvas(
+  width=1280,
+  height=720,
+  graph=MandelbrotFrame,
+  fallback="cpu"
+)
+```
+
+`GpuCanvas` は `graph`、`width`、`height`、`fallback` を受け取る。`graph` は GPU pass の依存関係を持つ Lume GPU IR の値でなければならない。
+
+WebGPU が利用できない環境では `fallback` に従う。`fallback` が未指定で WebGPU が利用できない場合は、runtime error ではなく、コンパイル時または起動時診断を出す。
+
+#### 22.7.3 Canvas diagnostics
+
+```txt
+LUME5201: Canvas cannot use nativeModule/nativeSymbol/nativeArgs
+LUME5202: NativeCanvas renderer must take CanvasSurface as first argument
+LUME5203: NativeCanvas args do not match renderer signature
+LUME5204: CanvasSurface cannot escape renderer call
+LUME5205: GpuCanvas graph must be a GPU graph value
+LUME5206: GpuCanvas requires gpu.render capability
+```
+
 ---
 
 ## 23. アクセシビリティ
@@ -309,6 +407,8 @@ Lume はアクセシビリティを標準仕様に含める。
 6. `role` と要素の組み合わせが不正
 7. `Modal` にタイトルがない
 8. `Dialog` に閉じる手段がない
+
+実装状況としては、`Image` の `alt`、`Input` の `label` / `aria-label`、`Link` の URL 安全性、`Form` の action 検査、`Button` の空ラベル警告までは実装済みである。`Box` の keyboard handler 検査、heading/role の整合性、`Modal` / `Dialog` / `Landmark` 系の診断は [未実装]。
 
 ### 23.3 例
 
@@ -363,6 +463,8 @@ trailing_slash = "never"
 scroll_restoration = true
 focus_main_on_navigation = true
 ```
+
+現行実装は `spa` 相当の client-side router を生成し、`mpa` / `hybrid` の route ごとの HTML 分割や、`server` の専用 trie matcher は [未実装] である。`focus_main_on_navigation` も、現在は focus の再捕捉と復元に寄せた簡易実装である。
 
 ---
 
@@ -490,6 +592,8 @@ route "/posts/:id<i64>" {
 
 型変換に失敗した場合は `notFound()` を返す。
 
+実装では typed dynamic segment の構文は受け取るが、数値型への厳密なキャストや `notFound()` による分岐は [未実装] で、JS router は `String` か数値っぽい文字列かの簡易判定に留まる。
+
 ### 24.6.1 ルート衝突解決
 
 同一 depth で複数 route が競合する場合、matcher 優先順位は以下とする。
@@ -527,7 +631,7 @@ catch-all segment は route の最後にのみ置ける。
 
 ---
 
-### 24.8 search params
+### 24.8 search params [未実装]
 
 ```lume
 page SearchPage {
@@ -568,9 +672,11 @@ action goUser(id: String) {
 
 `navigate` は `lume/std/router` の標準関数であり、Lume router runtime へ lowering される。
 
+`NavLink` は現在の path と一致したときに `aria-current` と `is-active` を付与する。`Anchor` は `Link` と同様に扱う。
+
 ---
 
-### 24.10 redirect / notFound
+### 24.10 redirect / notFound [未実装]
 
 ```lume
 page PrivatePage {
@@ -618,6 +724,8 @@ route "/dashboard" guard=requireLogin {
 }
 ```
 
+実装では route guard の構文は manifest に残るが、guard 自体の実行や `redirect` / `notFound` の制御フローは [未実装] である。
+
 複数 guard。
 
 ```lume
@@ -656,9 +764,11 @@ page RankingPage {
 }
 ```
 
+`query` は現在の compiler/runtime で client cache まで実装済みだが、`server query` の専用実行路は [未実装] で、現状は manifest と AST 情報として保持する段階である。
+
 ---
 
-### 24.13 metadata
+### 24.13 metadata [未実装]
 
 ```lume
 page UserPage(id: String) {
@@ -674,6 +784,8 @@ page UserPage(id: String) {
 ```
 
 metadata は HTML head または SSR head patch へ出力される。
+
+実際の `lume.manifest.json` には、`version`、`component`、`target`、`backends`、`state`、`routes`、`routeTree`、`styles`、`themes`、`actions`、`queries`、`ffi`、`ffiStructs`、`ffiEnums`、`ffiOpaques` が出力される。
 
 ---
 
@@ -708,7 +820,7 @@ metadata は HTML head または SSR head patch へ出力される。
 
 ---
 
-### 24.15 route matcher
+### 24.15 route matcher [一部実装]
 
 route matcher は以下のいずれかへ lowering される。
 
@@ -731,7 +843,7 @@ RouteTrie
 
 ---
 
-### 24.16 prefetch
+### 24.16 prefetch [未実装]
 
 ```lume
 Link(to="/users/{user.id}", prefetch="visible") {
@@ -767,6 +879,8 @@ router は遷移時に scroll と focus を管理する。
 
 `main` landmark が存在しない場合は a11y warning を出す。
 
+実装では focus の capture / restore は行うが、scroll restoration と `main` landmark 警告は [未実装]。
+
 ---
 
 ### 24.18 ルーター診断
@@ -785,4 +899,3 @@ LUME7010: route chunk exceeds budget
 ```
 
 ---
-

@@ -5,6 +5,10 @@ use lume_ir::LumeProgram;
 use std::collections::{BTreeSet, HashSet};
 
 pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
+    generate_with_wasm(program, html, false)
+}
+
+pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled: bool) -> String {
     let state_names = program
         .states()
         .map(|state| state.name.clone())
@@ -24,6 +28,33 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
     }
     js.push_str("};\n\n");
     js.push_str("const state = {};\n\n");
+    if wasm_enabled {
+        js.push_str("const lumeWasm = await loadLumeWasm();\n\n");
+        js.push_str("async function loadLumeWasm() {\n");
+        js.push_str("  const fallback = { enabled: false, exports: {}, error: null };\n");
+        js.push_str("  try {\n");
+        js.push_str("    const source = \"/assets/app.wasm\";\n");
+        js.push_str("    const imports = { env: {} };\n");
+        js.push_str("    let instance;\n");
+        js.push_str("    if (WebAssembly.instantiateStreaming) {\n");
+        js.push_str("      try {\n");
+        js.push_str("        ({ instance } = await WebAssembly.instantiateStreaming(fetch(source), imports));\n");
+        js.push_str("      } catch (_) {}\n");
+        js.push_str("    }\n");
+        js.push_str("    if (!instance) {\n");
+        js.push_str(
+            "      const bytes = await fetch(source).then(response => response.arrayBuffer());\n",
+        );
+        js.push_str("      ({ instance } = await WebAssembly.instantiate(bytes, imports));\n");
+        js.push_str("    }\n");
+        js.push_str("    instance.exports.lume_init?.(0, 0);\n");
+        js.push_str("    return { enabled: true, exports: instance.exports, error: null };\n");
+        js.push_str("  } catch (error) {\n");
+        js.push_str("    console.warn(\"Lume WASM runtime could not be loaded; continuing with JavaScript runtime.\", error);\n");
+        js.push_str("    return { ...fallback, error };\n");
+        js.push_str("  }\n");
+        js.push_str("}\n\n");
+    }
     if !program.server_actions.is_empty() {
         js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"dev-csrf-token\";\n\n");
         js.push_str("const serverActionParams = {\n");
@@ -89,6 +120,7 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
             ));
         }
     }
+    js.push_str(&component_actions_js(program, &state_names));
     js.push_str("async function restoreInitialState() {\n");
     js.push_str("  Object.assign(state, fallbackState);\n");
     js.push_str("  try {\n");
@@ -190,6 +222,9 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
         js.push_str("  void drawNativeCanvases();\n");
         js.push_str("}\n\n");
     }
+    js.push_str("function nativeCanvasDataAttr(name) {\n");
+    js.push_str("  return name.replaceAll('_', '-').replace(/[A-Z]/g, value => `-${value.toLowerCase()}`).replace(/^-/, '');\n");
+    js.push_str("}\n\n");
     js.push_str("async function drawNativeCanvases() {\n");
     js.push_str("  for (const canvas of root.querySelectorAll('canvas[data-lume-native-module][data-lume-native-symbol]')) {\n");
     js.push_str(
@@ -201,14 +236,14 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
     js.push_str("    const moduleName = canvas.dataset.lumeNativeModule || '';\n");
     js.push_str("    const symbolName = canvas.dataset.lumeNativeSymbol || '';\n");
     js.push_str("    const argNames = String(canvas.dataset.lumeNativeArgs || '').split(',').map(value => value.trim()).filter(Boolean);\n");
-    js.push_str("    const renderKey = [moduleName, symbolName, width, height, ...argNames.map(name => canvas.dataset[name] || '')].join('|');\n");
+    js.push_str("    const renderKey = [moduleName, symbolName, width, height, ...argNames.map(name => canvas.getAttribute(`data-${nativeCanvasDataAttr(name)}`) || '')].join('|');\n");
     js.push_str("    const readyKey = canvas.dataset.lumeNativeRenderKey || '';\n");
     js.push_str("    const pendingKey = canvas.dataset.lumeNativePendingKey || '';\n");
     js.push_str("    if (readyKey === renderKey || pendingKey === renderKey) continue;\n");
     js.push_str("    canvas.dataset.lumeNativePendingKey = renderKey;\n");
     js.push_str("    const url = new URL(`/__lume/native/${encodeURIComponent(moduleName)}/${encodeURIComponent(symbolName)}`, window.location.href);\n");
     js.push_str("    for (const name of argNames) {\n");
-    js.push_str("      const value = canvas.dataset[name];\n");
+    js.push_str("      const value = canvas.getAttribute(`data-${nativeCanvasDataAttr(name)}`);\n");
     js.push_str("      if (value !== undefined) url.searchParams.append('args', value);\n");
     js.push_str("    }\n");
     js.push_str("    try {\n");
@@ -395,7 +430,9 @@ fn render_element_template(
         "Button" => render_button_template(element, ctx, locals, states),
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
-        "MandelbrotSet" => render_mandelbrot_set_template(element, ctx, locals, states),
+        "Canvas" => render_canvas_template(element, ctx, locals, states),
+        "NativeCanvas" => render_native_canvas_template(element, ctx, locals, states),
+        "GpuCanvas" => render_gpu_canvas_template(element, ctx, locals, states),
         "Link" | "NavLink" | "Anchor" => {
             render_link_template(element, ctx, locals, states, program)
         }
@@ -587,11 +624,41 @@ fn render_image_template(
     )
 }
 
-fn render_mandelbrot_set_template(
+fn render_canvas_template(
     element: &ElementNode,
     ctx: &mut RenderCtx,
     locals: &HashSet<String>,
     states: &HashSet<String>,
+) -> String {
+    render_canvas_surface_template(element, ctx, locals, states, String::new())
+}
+
+fn render_native_canvas_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let native_attrs = native_canvas_attrs_template(element, locals, states);
+    render_canvas_surface_template(element, ctx, locals, states, native_attrs)
+}
+
+fn render_gpu_canvas_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let gpu_attrs = gpu_canvas_attrs_template(element, locals, states);
+    render_canvas_surface_template(element, ctx, locals, states, gpu_attrs)
+}
+
+fn render_canvas_surface_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+    native_attrs: String,
 ) -> String {
     let id = node_id(ctx);
     let width = attr_value(element, "width")
@@ -600,25 +667,220 @@ fn render_mandelbrot_set_template(
     let height = attr_value(element, "height")
         .map(|expr| attr_template_expr(expr, locals, states))
         .unwrap_or_else(|| "360".into());
-    let center_x = attr_value(element, "centerX")
-        .or_else(|| attr_value(element, "center_x"))
-        .map(|expr| attr_template_expr(expr, locals, states))
-        .unwrap_or_else(|| "-0.743643887".into());
-    let center_y = attr_value(element, "centerY")
-        .or_else(|| attr_value(element, "center_y"))
-        .map(|expr| attr_template_expr(expr, locals, states))
-        .unwrap_or_else(|| "0.131825904".into());
-    let scale = attr_value(element, "scale")
-        .map(|expr| attr_template_expr(expr, locals, states))
-        .unwrap_or_else(|| "85".into());
-    let max_iterations = attr_value(element, "maxIterations")
-        .or_else(|| attr_value(element, "max_iterations"))
-        .map(|expr| attr_template_expr(expr, locals, states))
-        .unwrap_or_else(|| "220".into());
+    let mut html = format!("<canvas data-lume-id=\"{}\"", id);
+    html.push_str(&event_attr_template(element, ctx, locals, states));
+    if let Some(aria) =
+        attr_value(element, "ariaLabel").or_else(|| attr_value(element, "aria-label"))
+    {
+        html.push_str(&format!(
+            " aria-label=\"{}\"",
+            attr_template_expr(aria, locals, states)
+        ));
+    }
+    html.push_str(&native_attrs);
+    html.push_str(&format!(
+        " width=\"{}\" height=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>",
+        width, height
+    ));
+    html
+}
+
+fn gpu_canvas_attrs_template(
+    element: &ElementNode,
+    _locals: &HashSet<String>,
+    _states: &HashSet<String>,
+) -> String {
+    attr_value(element, "graph")
+        .map(|expr| {
+            format!(
+                " data-lume-gpu-graph=\"{}\"",
+                escape_template(expr.raw.trim_matches(['"', '\'']))
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn component_actions_js(program: &LumeProgram, states: &HashSet<String>) -> String {
+    let mut js = String::new();
+    for action in program
+        .component
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            ComponentItem::Action(action) => Some(action),
+            _ => None,
+        })
+    {
+        let params = action
+            .params
+            .iter()
+            .map(|param| param.name.as_str())
+            .collect::<Vec<_>>();
+        let locals = params
+            .iter()
+            .map(|param| (*param).to_string())
+            .collect::<HashSet<_>>();
+        let async_prefix = if action.is_async { "async " } else { "" };
+        js.push_str(&format!(
+            "{}function {}({}) {{\n",
+            async_prefix,
+            action.name,
+            params.join(", ")
+        ));
+        for stmt in &action.body.statements {
+            js.push_str("  ");
+            js.push_str(&stmt_js(stmt, &locals, states));
+            js.push('\n');
+        }
+        js.push_str("}\n\n");
+    }
+    js
+}
+
+fn native_canvas_attrs_template(
+    element: &ElementNode,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let Some((module, symbol)) =
+        attr_value(element, "renderer").and_then(|expr| native_renderer(expr.raw.trim()))
+    else {
+        return String::new();
+    };
+    let args = attr_value(element, "args")
+        .map(|expr| native_arg_fields(expr.raw.trim()))
+        .unwrap_or_default();
+    let arg_names = args
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let arg_attrs = args
+        .into_iter()
+        .map(|(name, expr)| {
+            format!(
+                " data-{}=\"{}\"",
+                data_attr_name(&name),
+                attr_template_expr(&expr, locals, states)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
     format!(
-        "<canvas data-lume-id=\"{}\" data-lume-native-module=\"renderkit\" data-lume-native-symbol=\"mandelbrot_render\" data-lume-native-args=\"width,height,maxIterations,centerX,centerY,scale\" width=\"{}\" height=\"{}\" data-width=\"{}\" data-height=\"{}\" data-center-x=\"{}\" data-center-y=\"{}\" data-scale=\"{}\" data-max-iterations=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>",
-        id, width, height, width, height, center_x, center_y, scale, max_iterations
+        " data-lume-native-module=\"{}\" data-lume-native-symbol=\"{}\" data-lume-native-args=\"{}\"{}",
+        escape_template(&module),
+        escape_template(&symbol),
+        escape_template(&arg_names),
+        arg_attrs
     )
+}
+
+fn native_renderer(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim_matches(['"', '\'']);
+    let (module, symbol) = raw.split_once('.')?;
+    Some((module.trim().to_string(), symbol.trim().to_string()))
+}
+
+fn native_arg_fields(raw: &str) -> Vec<(String, Expr)> {
+    let raw = raw.trim();
+    let Some(body) = raw
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Vec::new();
+    };
+    split_top_level(body, ',')
+        .into_iter()
+        .filter_map(|field| {
+            let (key, value) = split_top_level_once(&field, ':')?;
+            let key = key.trim().trim_matches(['"', '\'']).to_string();
+            (!key.is_empty()).then_some((
+                key,
+                Expr {
+                    raw: value.trim().to_string(),
+                    span: Default::default(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn split_top_level(raw: &str, delimiter: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                parts.push(raw[start..idx].to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(raw[start..].to_string());
+    parts
+}
+
+fn split_top_level_once(raw: &str, delimiter: char) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                return Some((
+                    raw[..idx].to_string(),
+                    raw[idx + ch.len_utf8()..].to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn data_attr_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch == '_' {
+            out.push('-');
+        } else if ch.is_ascii_uppercase() {
+            out.push('-');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim_start_matches('-').to_string()
 }
 
 fn render_link_template(
@@ -859,7 +1121,10 @@ fn node_has_dynamic(node: &ViewNode, program: &LumeProgram) -> bool {
                     _ => false,
                 });
             }
-            if element.name == "MandelbrotSet" {
+            if matches!(
+                element.name.as_str(),
+                "Canvas" | "NativeCanvas" | "GpuCanvas"
+            ) {
                 return true;
             }
             element
@@ -1226,6 +1491,54 @@ component App {
         assert!(js.contains("return callServerAction(\"add\", args);"));
         assert!(js.contains("void actions[0](event, target);"));
         assert!(js.contains("add(state.count);"));
+    }
+
+    #[test]
+    fn generates_native_canvas_attrs_and_component_actions() {
+        let source = r#"
+component App {
+  state width: i64 = 320
+  state height: i64 = 180
+  state scale: f64 = 85.0
+
+  action zoomIn {
+    scale += 15
+  }
+
+  view {
+    Column {
+      NativeCanvas(
+        renderer=renderkit.mandelbrot_render,
+        width=width,
+        height=height,
+        args={
+          width: width,
+          height: height,
+          scale: scale
+        }
+      )
+
+      Button("Zoom") {
+        on click {
+          zoomIn()
+        }
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("function zoomIn()"));
+        assert!(js.contains("state.scale += 15;"));
+        assert!(js.contains("data-lume-native-module=\"renderkit\""));
+        assert!(js.contains("data-lume-native-symbol=\"mandelbrot_render\""));
+        assert!(js.contains("data-lume-native-args=\"width,height,scale\""));
+        assert!(js.contains("data-scale=\"${escapeAttr(state.scale ?? \"\")}\""));
+        assert!(js.contains("zoomIn();"));
     }
 
     #[test]

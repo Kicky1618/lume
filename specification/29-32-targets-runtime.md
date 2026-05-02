@@ -26,6 +26,12 @@ HTML は view / component 経由
 UnsafeHTML は明示的な sanitizer 付きのみ
 ```
 
+実装では raw JavaScript 埋め込みは受け付けない。
+
+low-level 描画連携は `Canvas` ではなく `NativeCanvas` / `GpuCanvas` の専用要素で表現する。
+
+`data-lume-native-*` 属性は runtime の内部表現であり、Lume ソース上の public API としては扱わない。
+
 ### 28.1 禁止例
 
 ```lume
@@ -111,6 +117,8 @@ CSS: テーマ、レイアウト、スタイル、アニメーション
 Manifest: ルート、Server Actions、assets、hydration 情報
 ```
 
+現行の `lume.manifest.json` はこれに加えて `version`、`component`、`target`、`backends`、`routeTree`、`styles`、`themes`、`queries`、`ffi` 系の配列を含む。`lume.backend.json` も同時に生成され、server action と native bridge の実行情報を持つ。
+
 ---
 
 ### 29.2 HTML + JavaScript + CSS + WebAssembly ターゲット
@@ -139,6 +147,8 @@ WASM は以下に使える。
 DOM 操作自体は JavaScript 経由で行う。
 
 WebAssembly が DOM を直接操作できない環境を考えると、ここを無理に神格化すると面倒が増える。WASM は速い部品、JS はブラウザとの接着剤として扱う。
+
+実装では WASM はまだ一枚岩の patch runtime ではなく、`lume_init` の初期化と補助関数の提供が主である。`lume_dispatch` ベースの差分適用や WASM route matcher は [未実装]。
 
 ---
 
@@ -252,6 +262,8 @@ nodes.button.addEventListener("click", () => {
 
 実際の生成コードでは、querySelector の乱用を避け、初期化時に DOM 参照を一度だけ束縛する。
 
+実装では `captureFocus()` / `restoreFocus()`、`navigate()`、`updateNavLinks()`、`callServerAction()`、`loadLumeWasm()`、`restoreInitialState()` などのヘルパーを含む。静的レンダーでは一部で `querySelector` を使うが、生成コードは `data-lume-id` と event binding を前提にしている。
+
 ---
 
 ### 31.3 CSS 出力
@@ -276,7 +288,7 @@ nodes.button.addEventListener("click", () => {
 
 ---
 
-### 31.4 WASM 出力
+### 31.4 WASM 出力 [未実装]
 
 WASM ターゲットでは、状態遷移と差分計算を WASM に配置できる。
 
@@ -322,6 +334,8 @@ JavaScript は起動時に以下を行う。
 4. event listener を接続する
 5. 必要なら WASM を初期化する
 
+実装では state は `lume.manifest.json` から復元され、フォーカスは `data-lume-focus-key` で簡易復元される。
+
 ---
 
 ### 31.6 ルーティング出力
@@ -333,6 +347,8 @@ spa: 1 つの index.html + JS router
 mpa: route ごとに HTML を生成
 hybrid: 静的 route は HTML、動的 route は JS router
 ```
+
+現行実装は `spa` に寄せた client-side router を生成する。`mpa` と `hybrid` の route ごとの HTML 分割は [未実装]。
 
 ---
 
@@ -350,6 +366,8 @@ native
 Node.js / Bun / Deno / Edge Worker は Lume の正式バックエンドではない。
 
 それらの上で動かす adapter を外部実装することは可能だが、仕様上の実行モデルは JIT / Native の 2 つだけとする。
+
+実装では dev server と native bridge がこのモデルに対応する。JIT は server action の一部でのみ使われ、native は FFI bridge を含むサーバー実行を担当する。
 
 ---
 
@@ -486,4 +504,3 @@ server query user = db.user.find(id)
 サーバー専用 query はクライアントバンドルに含めてはならない。
 
 ---
-

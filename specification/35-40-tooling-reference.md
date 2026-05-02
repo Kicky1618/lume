@@ -4,12 +4,14 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 
 標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
 
+実装では `Text`、`Button`、`Input`、`Image`、`Form`、`Link`、`NavLink`、`Outlet`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Canvas`、`NativeCanvas` が主要な内蔵要素として扱われる。`GpuCanvas`、`TextArea`、`Modal`、`Dialog`、`Tabs`、`Table`、`Spacer`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`query`、`invalidate`、`t`、`locale` などは [未実装]。
+
 ### 35.1 `lume/std/ui`
 
 基本 UI コンポーネント。
 
 ```lume
-import { Text, Button, Input, Image, Form, Anchor } from "lume/std/ui"
+import { Text, Button, Input, Image, Form, Anchor, Canvas, NativeCanvas } from "lume/std/ui"
 ```
 
 ### 35.2 `lume/std/layout`
@@ -44,6 +46,8 @@ import {
 import { Form, Field, FormData, validate } from "lume/std/form"
 ```
 
+`Field` と `validate` は仕様上の目標であり、現行実装ではフォーム要素と Server Action 直結のみをサポートする。
+
 ### 35.5 `lume/std/action`
 
 Server Action client stub と action result 型。
@@ -51,6 +55,8 @@ Server Action client stub と action result 型。
 ```lume
 import { ActionResult, ActionError } from "lume/std/action"
 ```
+
+`ActionResult` / `ActionError` は現在の runtime の JSON 形状に対応するための概念で、専用モジュールとしては [未実装]。
 
 ### 35.6 `lume/std/query`
 
@@ -60,15 +66,31 @@ client query と cache。
 import { query, invalidate } from "lume/std/query"
 ```
 
+`query` の cache 層は実装済みだが、`invalidate` の汎用 API はまだない。
+
 ### 35.7 `lume/std/ffi`
 
 FFI 用型と補助定義。
 
 ```lume
-import { Owned, Borrowed, View, Handle, Ptr, StatusCode } from "lume/std/ffi"
+import { Owned, Borrowed, View, Handle, Ptr, StatusCode, CanvasSurface } from "lume/std/ffi"
 ```
 
-### 35.8 `lume/std/a11y`
+`CanvasSurface` は `NativeCanvas` renderer の第一引数として使う opaque borrowed handle である。保存、コピー、renderer 呼び出し外への escape は禁止する。
+
+### 35.8 `lume/std/gpu`
+
+GPU resource、shader、GPU graph、GpuCanvas。
+
+```lume
+import { GpuCanvas, gpu } from "lume/std/gpu"
+```
+
+`lume/std/gpu` は WebGPU を最初の実装 target とするが、標準モジュール自体は WebGPU API の薄い移植ではなく Lume GPU IR の公開 API とする。
+
+現行実装では [未実装]。
+
+### 35.9 `lume/std/a11y`
 
 アクセシビリティ補助。
 
@@ -76,7 +98,9 @@ import { Owned, Borrowed, View, Handle, Ptr, StatusCode } from "lume/std/ffi"
 import { VisuallyHidden, FocusTrap, Landmark } from "lume/std/a11y"
 ```
 
-### 35.9 `lume/std/asset`
+`VisuallyHidden`、`FocusTrap`、`Landmark` のコンポーネント群は [未実装]。
+
+### 35.10 `lume/std/asset`
 
 asset 参照。
 
@@ -86,7 +110,7 @@ import logo from "asset:./logo.svg"
 
 asset import は Lume compiler が処理する。JavaScript bundler の import ではない。
 
-### 35.10 `lume/std/i18n`
+### 35.11 `lume/std/i18n`
 
 国際化。
 
@@ -94,7 +118,7 @@ asset import は Lume compiler が処理する。JavaScript bundler の import �
 import { t, locale } from "lume/std/i18n"
 ```
 
-### 35.11 標準モジュール診断
+### 35.12 標準モジュール診断
 
 ```txt
 LUME6101: unknown standard module
@@ -138,6 +162,8 @@ lume fmt
 ```bash
 lume init
 ```
+
+`lume init` は `lume.toml` と `src/app.lume` の雛形を作成する。
 
 ---
 
@@ -321,4 +347,3 @@ component Example(title: String) {
 4. 長い属性は複数行化する
 
 ---
-

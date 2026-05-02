@@ -162,7 +162,9 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "Button" => render_button(element, ctx),
         "Input" => render_input(element, ctx),
         "Image" => render_image(element, ctx),
-        "MandelbrotSet" => render_mandelbrot_set(element, ctx),
+        "Canvas" => render_canvas(element, ctx),
+        "NativeCanvas" => render_native_canvas(element, ctx),
+        "GpuCanvas" => render_gpu_canvas(element, ctx),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
         "Form" => render_form(element, ctx, program),
         "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
@@ -170,7 +172,19 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
     }
 }
 
-fn render_mandelbrot_set(element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
+    render_canvas_surface(element, ctx, String::new())
+}
+
+fn render_native_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
+    render_canvas_surface(element, ctx, native_canvas_attrs(element, ctx))
+}
+
+fn render_gpu_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
+    render_canvas_surface(element, ctx, gpu_canvas_attrs(element, ctx))
+}
+
+fn render_canvas_surface(element: &ElementNode, ctx: &mut Ctx, native_attrs: String) -> String {
     let id = node_id(ctx);
     let width = attr_value(element, "width")
         .map(|expr| eval_expr(expr, ctx).to_attr())
@@ -178,33 +192,178 @@ fn render_mandelbrot_set(element: &ElementNode, ctx: &mut Ctx) -> String {
     let height = attr_value(element, "height")
         .map(|expr| eval_expr(expr, ctx).to_attr())
         .unwrap_or_else(|| "360".into());
-    let center_x = attr_value(element, "centerX")
-        .or_else(|| attr_value(element, "center_x"))
-        .map(|expr| eval_expr(expr, ctx).to_attr())
-        .unwrap_or_else(|| "-0.743643887".into());
-    let center_y = attr_value(element, "centerY")
-        .or_else(|| attr_value(element, "center_y"))
-        .map(|expr| eval_expr(expr, ctx).to_attr())
-        .unwrap_or_else(|| "0.131825904".into());
-    let scale = attr_value(element, "scale")
-        .map(|expr| eval_expr(expr, ctx).to_attr())
-        .unwrap_or_else(|| "85".into());
-    let max_iterations = attr_value(element, "maxIterations")
-        .or_else(|| attr_value(element, "max_iterations"))
-        .map(|expr| eval_expr(expr, ctx).to_attr())
-        .unwrap_or_else(|| "220".into());
+    let event_attr = event_attr(element, ctx, &id);
+    let aria = attr_value(element, "ariaLabel")
+        .or_else(|| attr_value(element, "aria-label"))
+        .map(|expr| {
+            format!(
+                " aria-label=\"{}\"",
+                escape_attr(&eval_expr(expr, ctx).to_attr())
+            )
+        })
+        .unwrap_or_default();
     format!(
-        "<canvas data-lume-id=\"{}\" data-lume-native-module=\"renderkit\" data-lume-native-symbol=\"mandelbrot_render\" data-lume-native-args=\"width,height,maxIterations,centerX,centerY,scale\" width=\"{}\" height=\"{}\" data-width=\"{}\" data-height=\"{}\" data-center-x=\"{}\" data-center-y=\"{}\" data-scale=\"{}\" data-max-iterations=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>\n",
+        "<canvas data-lume-id=\"{}\"{}{}{} width=\"{}\" height=\"{}\" style=\"max-width:100%;height:auto;border:1px solid #20242f;background:#05070c;display:block\"></canvas>\n",
         id,
+        event_attr,
+        aria,
+        native_attrs,
         escape_attr(&width),
-        escape_attr(&height),
-        escape_attr(&width),
-        escape_attr(&height),
-        escape_attr(&center_x),
-        escape_attr(&center_y),
-        escape_attr(&scale),
-        escape_attr(&max_iterations)
+        escape_attr(&height)
     )
+}
+
+fn native_canvas_attrs(element: &ElementNode, ctx: &Ctx) -> String {
+    let Some(renderer) =
+        attr_value(element, "renderer").and_then(|expr| native_renderer(expr.raw.trim()))
+    else {
+        return String::new();
+    };
+    let args = attr_value(element, "args")
+        .map(|expr| native_arg_fields(expr.raw.trim()))
+        .unwrap_or_default();
+    let arg_names = args
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let arg_attrs = args
+        .into_iter()
+        .map(|(name, expr)| {
+            format!(
+                " data-{}=\"{}\"",
+                data_attr_name(&name),
+                escape_attr(&eval_expr(&expr, ctx).to_attr())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    format!(
+        " data-lume-native-module=\"{}\" data-lume-native-symbol=\"{}\" data-lume-native-args=\"{}\"{}",
+        escape_attr(&renderer.0),
+        escape_attr(&renderer.1),
+        escape_attr(&arg_names),
+        arg_attrs
+    )
+}
+
+fn gpu_canvas_attrs(element: &ElementNode, _ctx: &Ctx) -> String {
+    attr_value(element, "graph")
+        .map(|expr| {
+            format!(
+                " data-lume-gpu-graph=\"{}\"",
+                escape_attr(expr.raw.trim_matches(['"', '\'']))
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn native_renderer(raw: &str) -> Option<(String, String)> {
+    let raw = raw.trim_matches(['"', '\'']);
+    let (module, symbol) = raw.split_once('.')?;
+    Some((module.trim().to_string(), symbol.trim().to_string()))
+}
+
+fn native_arg_fields(raw: &str) -> Vec<(String, Expr)> {
+    let raw = raw.trim();
+    let Some(body) = raw
+        .strip_prefix('{')
+        .and_then(|value| value.strip_suffix('}'))
+    else {
+        return Vec::new();
+    };
+    split_top_level(body, ',')
+        .into_iter()
+        .filter_map(|field| {
+            let (key, value) = split_top_level_once(&field, ':')?;
+            let key = key.trim().trim_matches(['"', '\'']).to_string();
+            (!key.is_empty()).then_some((
+                key,
+                Expr {
+                    raw: value.trim().to_string(),
+                    span: Default::default(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn split_top_level(raw: &str, delimiter: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                parts.push(raw[start..idx].to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(raw[start..].to_string());
+    parts
+}
+
+fn split_top_level_once(raw: &str, delimiter: char) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (idx, ch) in raw.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                return Some((
+                    raw[..idx].to_string(),
+                    raw[idx + ch.len_utf8()..].to_string(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn data_attr_name(name: &str) -> String {
+    let mut out = String::new();
+    for ch in name.chars() {
+        if ch == '_' {
+            out.push('-');
+        } else if ch.is_ascii_uppercase() {
+            out.push('-');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim_start_matches('-').to_string()
 }
 
 fn render_component(

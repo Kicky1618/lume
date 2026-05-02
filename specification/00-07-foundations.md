@@ -217,7 +217,16 @@ worker
 header
 redirect
 notFound
+key
+strict
+revalidate
+callback
+ownership
+free
+lifetime
 ```
+
+実装では `key`、`strict`、`revalidate`、`callback`、`ownership`、`free`、`lifetime` も構文上の修飾子として扱う。
 
 ### 4.3 modifier
 
@@ -442,6 +451,7 @@ lume/std/i18n
 lume/std/time
 lume/std/result
 lume/std/ffi
+lume/std/gpu
 ```
 
 #### 6.9.1 lume/std/ui
@@ -458,6 +468,8 @@ Dialog
 Tabs
 Table
 Anchor
+Canvas
+NativeCanvas
 ```
 
 #### 6.9.2 lume/std/layout
@@ -512,7 +524,21 @@ Handle<T>
 Ptr<T>
 ConstPtr<T>
 StatusCode
+CanvasSurface
 ```
+
+#### 6.9.6 lume/std/gpu
+
+```txt
+GpuCanvas
+gpu
+gpu buffer
+gpu texture
+gpu shader
+gpu graph
+```
+
+`lume/std/gpu` は WebGPU API の直接移植ではなく、Lume GPU IR の公開 API として扱う。
 
 ---
 
@@ -1665,4 +1691,3 @@ LUME5015: Any requires tagged runtime representation in native backend
 ```
 
 ---
-

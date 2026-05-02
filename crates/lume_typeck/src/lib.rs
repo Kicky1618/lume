@@ -189,8 +189,58 @@ fn check_element(
     if element.name == "Form" {
         check_form(element, ctx, diagnostics);
     }
+    if matches!(
+        element.name.as_str(),
+        "Canvas" | "NativeCanvas" | "GpuCanvas"
+    ) {
+        check_canvas(element, diagnostics);
+    }
     if let Some(children) = &element.children {
         check_view(children, states, known_components, ctx, diagnostics);
+    }
+}
+
+fn check_canvas(element: &ElementNode, diagnostics: &mut Diagnostics) {
+    if element.name == "Canvas"
+        && (has_attr(element, "nativeModule")
+            || has_attr(element, "native_module")
+            || has_attr(element, "nativeSymbol")
+            || has_attr(element, "native_symbol")
+            || has_attr(element, "nativeArgs")
+            || has_attr(element, "native_args"))
+    {
+        diagnostics.push(Diagnostic::error(
+            "LUME5201",
+            "Canvas cannot use nativeModule/nativeSymbol/nativeArgs; use NativeCanvas(renderer=..., args={...})",
+            Some(element.span),
+        ));
+    }
+    if element.name == "NativeCanvas" {
+        match attr_literal(element, "renderer") {
+            Some(renderer) if renderer.contains('.') => {}
+            _ => diagnostics.push(Diagnostic::error(
+                "LUME5202",
+                "NativeCanvas renderer must be a module function such as renderkit.mandelbrot_render",
+                Some(element.span),
+            )),
+        }
+        if let Some(args) = attr_raw(element, "args") {
+            let raw = args.trim();
+            if !(raw.starts_with('{') && raw.ends_with('}')) {
+                diagnostics.push(Diagnostic::error(
+                    "LUME5203",
+                    "NativeCanvas args must be a structured object",
+                    Some(element.span),
+                ));
+            }
+        }
+    }
+    if element.name == "GpuCanvas" && !has_attr(element, "graph") {
+        diagnostics.push(Diagnostic::error(
+            "LUME5205",
+            "GpuCanvas graph must be a GPU graph value",
+            Some(element.span),
+        ));
     }
 }
 
@@ -275,6 +325,24 @@ fn has_attr(element: &ElementNode, name: &str) -> bool {
 }
 
 fn attr_literal(element: &ElementNode, name: &str) -> Option<String> {
+    attr_raw(element, name).and_then(|raw| {
+        let raw = raw.trim();
+        if raw.starts_with('"') && raw.ends_with('"') {
+            Some(raw.trim_matches('"').to_string())
+        } else if raw.starts_with('\'') && raw.ends_with('\'') {
+            Some(raw.trim_matches('\'').to_string())
+        } else if raw
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        {
+            Some(raw.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn attr_raw<'a>(element: &'a ElementNode, name: &str) -> Option<&'a str> {
     element
         .attrs
         .iter()
@@ -285,21 +353,7 @@ fn attr_literal(element: &ElementNode, name: &str) -> Option<String> {
                 _ => None,
             })
         })
-        .and_then(|expr| {
-            let raw = expr.raw.trim();
-            if raw.starts_with('"') && raw.ends_with('"') {
-                Some(raw.trim_matches('"').to_string())
-            } else if raw.starts_with('\'') && raw.ends_with('\'') {
-                Some(raw.trim_matches('\'').to_string())
-            } else if raw
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-            {
-                Some(raw.to_string())
-            } else {
-                None
-            }
-        })
+        .map(|expr| expr.raw.as_str())
 }
 
 fn collect_server_actions(program: &HirProgram) -> HashSet<String> {
@@ -582,6 +636,9 @@ fn standard_component_symbols() -> HashSet<String> {
         "Link",
         "NavLink",
         "Outlet",
+        "Canvas",
+        "NativeCanvas",
+        "GpuCanvas",
         "Field",
         "VisuallyHidden",
         "FocusTrap",
