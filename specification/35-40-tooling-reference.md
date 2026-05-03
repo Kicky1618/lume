@@ -188,6 +188,7 @@ incremental = true
 
 [frontend]
 routing = "spa"
+activation = "hydrate"
 hydration = "partial"
 
 [backend]
@@ -210,6 +211,7 @@ opt_level = "O1"
 a11y = "error"
 ssr = "warn"
 optimization = "warn"
+resumability = "warn"
 ```
 
 `max-runtime` 用。
@@ -237,6 +239,18 @@ opt_level = 3
 lto = "full"
 strip = "all"
 cpu = "generic"
+```
+
+resumable 起動を使う場合。
+
+```toml
+[frontend]
+routing = "spa"
+activation = "resume"
+hydration = "partial"
+
+[diagnostics]
+resumability = "error"
 ```
 
 環境ごとの差分は `lume.dev.toml` / `lume.release.toml` として分離できる。
@@ -313,6 +327,13 @@ LUME1007: SSR unsafe expression
 LUME1008: Accessibility violation
 LUME1009: Invalid route pattern
 LUME1010: Unknown theme token
+LUME1020: Resumable boundary cannot be inferred
+LUME1021: Captured value is not serializable
+LUME1022: Event handler captures server-only value
+LUME1023: Top-level side effect prevents resumability
+LUME1024: Resume marker mismatch
+LUME1025: Symbol chunk is missing from manifest
+LUME1026: Boundary fell back to hydration
 ```
 
 ---

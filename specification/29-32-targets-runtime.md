@@ -114,10 +114,12 @@ React / Vue / Svelte / Solid / Angular などの UI フレームワーク向け�
 HTML: 初期 DOM 構造
 JavaScript: 状態管理、イベント、差分更新、ルーティング、Server Action 呼び出し
 CSS: テーマ、レイアウト、スタイル、アニメーション
-Manifest: ルート、Server Actions、assets、hydration 情報
+Manifest: ルート、Server Actions、assets、hydration / resumability 情報
 ```
 
 現行の `lume.manifest.json` はこれに加えて `version`、`component`、`target`、`backends`、`routeTree`、`styles`、`themes`、`queries`、`ffi` 系の配列を含む。`lume.backend.json` も同時に生成され、server action と native bridge の実行情報を持つ。
+
+resumable build では、manifest に `resumeGraph`、`symbols`、`eventBindings`、`serializedState` の概要を追加する。これらは実行コードそのものではなく、DOM 上の marker と遅延ロード対象の symbol を対応付ける索引である。
 
 ---
 
@@ -338,7 +340,300 @@ JavaScript は起動時に以下を行う。
 
 ---
 
-### 31.6 ルーティング出力
+### 31.6 Resumable 起動モデル [未実装]
+
+Lume は通常の hydration に加えて、Qwik 風の **resumable** 起動モデルを持てる。
+
+resumable は「サーバーで生成した HTML をクライアントで即座に再実行して再構築する」のではなく、サーバー実行時に得られた UI の実行状態、DOM marker、event binding、遅延ロード可能な action symbol を HTML と manifest に直列化し、ブラウザでは必要な瞬間までコードを起動しないモデルである。
+
+目的。
+
+1. 初期ロード時の JavaScript 評価量を減らす
+2. event handler をユーザー操作時まで遅延ロードする
+3. SSR 済み DOM を破棄せず、そのまま実行可能状態として再開する
+4. route、component、action 単位の細かい code splitting を可能にする
+5. hydration mismatch を「再実行差分」ではなく「直列化境界の不一致」として診断する
+
+resumable は SSR の上に成立する。CSR only の出力では resumable を有効にしても通常の lazy hydration と同等に扱う。
+
+---
+
+#### 31.6.1 activation mode
+
+frontend の起動方式は `activation` で指定する。
+
+```toml
+[frontend]
+routing = "spa"
+activation = "resume"
+hydration = "partial"
+```
+
+指定可能値。
+
+```txt
+hydrate: 起動時に対象 component を即時 hydration する
+partial-hydrate: 可視性、idle、interaction に応じて部分 hydration する
+resume: DOM と serialized state から実行を再開し、handler は操作時に読み込む
+```
+
+既定値は `hydrate` とする。`hydration = "partial"` は `activation = "partial-hydrate"` の旧別名として扱えるが、新しい仕様では `activation` を優先する。
+
+---
+
+#### 31.6.2 DOM marker
+
+resumable 出力では、SSR HTML に resume 用 marker を付与する。
+
+```html
+<div
+  data-lume-component="Counter"
+  data-lume-id="c0"
+  data-lume-r="b0"
+>
+  <span data-lume-id="n1" data-lume-bind="s0.count">Count: 0</span>
+  <button
+    data-lume-id="n2"
+    data-lume-on="click:sym_counter_increment"
+    data-lume-state="s0"
+  >増やす</button>
+</div>
+```
+
+marker の意味。
+
+```txt
+data-lume-r: resume boundary id
+data-lume-id: DOM node id
+data-lume-bind: state / derived binding id
+data-lume-on: event type と action symbol の対応
+data-lume-state: 参照する serialized state id
+```
+
+これらの属性は生成物の内部 ABI であり、Lume ソース上の public API ではない。
+
+---
+
+#### 31.6.3 serialized state
+
+state は HTML 内の JSON script、または manifest 参照の外部 JSON として直列化する。
+
+```html
+<script type="application/lume-state" id="lume-state-s0">
+{"count":0}
+</script>
+```
+
+外部化する場合。
+
+```json
+{
+  "serializedState": {
+    "s0": {
+      "url": "/assets/state/counter.s0.json",
+      "hash": "sha256-..."
+    }
+  }
+}
+```
+
+直列化可能な値は JSON 互換値、Lume primitive、record、array、enum-like object に限定する。関数、DOM node、opaque handle、FFI pointer、stream、AbortController、Promise は直列化できない。
+
+直列化できない値を `state`、`derived memo`、event closure が捕捉する場合、コンパイラは resumable 不適合として診断する。
+
+```txt
+error[LUME1021]: value captured by resumable action is not serializable
+```
+
+---
+
+#### 31.6.4 action symbol と lazy event
+
+event handler は直接インライン化せず、symbol として分割する。
+
+Lume。
+
+```lume
+component Counter {
+  state count: Int = 0
+
+  action increment() {
+    count += 1
+  }
+
+  view {
+    Button("増やす") {
+      on click {
+        increment()
+      }
+    }
+  }
+}
+```
+
+resumable 出力の概念。
+
+```json
+{
+  "symbols": {
+    "sym_counter_increment": {
+      "chunk": "/assets/chunks/counter.increment.js",
+      "captures": ["s0.count"],
+      "boundary": "b0"
+    }
+  },
+  "eventBindings": [
+    {
+      "node": "n2",
+      "event": "click",
+      "symbol": "sym_counter_increment",
+      "state": "s0"
+    }
+  ]
+}
+```
+
+ブラウザ runtime は初期化時に全 handler を import しない。最初の `click` で `sym_counter_increment` の chunk を読み込み、対応する serialized state を復元し、action を実行し、patch を DOM に適用する。
+
+```txt
+user event
+  -> global delegated listener
+  -> lookup data-lume-on
+  -> load symbol chunk
+  -> restore state scope
+  -> run action
+  -> apply DOM patch
+  -> persist updated state scope
+```
+
+---
+
+#### 31.6.5 resume boundary
+
+resume boundary は、直列化、復元、chunk 分割、error isolation の単位である。
+
+既定では route root、page、layout、component の stateful subtree が boundary 候補になる。コンパイラは以下を考慮して boundary を自動決定する。
+
+1. state を持つ component
+2. event handler を持つ subtree
+3. server query の結果を参照する subtree
+4. lazy route の root
+5. ClientOnly の fallback 境界
+
+明示 boundary 構文は v0.1 では導入しない。必要になった場合は将来 `resume boundary` ブロックまたは component modifier として追加する。
+
+---
+
+#### 31.6.6 resumable と Server Actions
+
+Server Actions は resumable handler から呼び出せる。
+
+```lume
+Button("保存") {
+  on click {
+    await saveUser.mutate(form)
+  }
+}
+```
+
+この場合、client chunk には action 本体を含めず、既存の Server Action stub と action id のみを含める。秘密情報、DB 接続、server query 実装はクライアントへ直列化してはならない。
+
+Server Action の結果で cache invalidation が発生した場合、runtime は該当 boundary の state scope を invalid にし、必要な query / HTML fragment / patch を再取得する。
+
+---
+
+#### 31.6.7 resumable と WASM
+
+WASM ターゲットでは、action symbol の実体を JS chunk ではなく WASM export にできる。
+
+```json
+{
+  "symbols": {
+    "sym_counter_increment": {
+      "wasmExport": "lume_sym_counter_increment",
+      "captures": ["s0.count"],
+      "boundary": "b0"
+    }
+  }
+}
+```
+
+この場合も DOM 操作は JS runtime が行う。WASM は state 復元、action 実行、patch list 生成を担当できる。
+
+```txt
+event
+  -> JS delegated listener
+  -> ensure WASM initialized
+  -> call wasm symbol
+  -> receive patch list
+  -> JS applies patches
+```
+
+---
+
+#### 31.6.8 preload と prefetch
+
+resumable runtime は、ユーザー操作の直前に必要な symbol を事前取得できる。
+
+既定の prefetch trigger。
+
+```txt
+pointerover
+focus
+viewport enter
+route intent
+idle budget
+```
+
+prefetch はヒントであり、正しさに影響してはならない。prefetch できなかった場合も最初の event 時に chunk を取得して実行する。
+
+---
+
+#### 31.6.9 制約
+
+resumable component では以下を禁止または警告する。
+
+```txt
+module top-level side effect
+SSR と client で結果が変わる view 式
+非直列化値の state 保存
+event handler からの DOM 直接参照
+handler closure に巨大 object を捕捉すること
+server-only 値の client capture
+```
+
+代表的な診断。
+
+```txt
+LUME1020: resumable boundary cannot be inferred
+LUME1021: captured value is not serializable
+LUME1022: event handler captures server-only value
+LUME1023: top-level side effect prevents resumability
+LUME1024: resume marker mismatch
+LUME1025: symbol chunk is missing from manifest
+```
+
+---
+
+#### 31.6.10 通常 hydration との関係
+
+`activation = "resume"` は hydration の完全な置き換えではない。以下の場合、runtime は boundary 単位で通常 hydration にフォールバックできる。
+
+1. 直列化不能な legacy component を含む
+2. dev server で詳細な runtime assertion を有効にしている
+3. manifest と HTML の hash が一致しない
+4. browser capability が不足している
+5. userland adapter が resumable chunk を提供できない
+
+フォールバック時は警告を出す。
+
+```txt
+warning[LUME1026]: boundary fell back to hydration
+```
+
+---
+
+### 31.7 ルーティング出力
 
 ルーティングは client-side router または static multi-page 出力に変換する。
 

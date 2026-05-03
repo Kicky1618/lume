@@ -165,5 +165,38 @@ Lume の UI は状態変化に応じて再評価される。
 
 Lume runtime は依存グラフに基づく差分再描画モデルに従う。
 
+### 43.3 Resumable metadata
+
+Resumable は v0.1 では新しいソース構文を追加しない。parser / AST は既存の component、state、derived、action、effect、view、event handler を保持し、HIR lowering 以降で resume 用 metadata を生成する。
+
+HIR / IR は以下の派生情報を持てる。
+
+```rust
+pub struct ResumeBoundary {
+    pub id: ResumeBoundaryId,
+    pub root_node: NodeId,
+    pub state_scopes: Vec<StateScopeId>,
+    pub symbols: Vec<ResumeSymbolId>,
+    pub fallback: ResumeFallback,
+}
+
+pub struct ResumeSymbol {
+    pub id: ResumeSymbolId,
+    pub event: Option<EventKind>,
+    pub action: ActionId,
+    pub captures: Vec<CaptureId>,
+    pub chunk: Option<ChunkId>,
+    pub wasm_export: Option<String>,
+}
+
+pub enum ResumeFallback {
+    HydrateBoundary,
+    ClientOnly,
+    Error,
+}
+```
+
+`captures` には resumable action が参照する state、props、derived 値、Server Action stub を記録する。capture graph に非直列化値または server-only 値が含まれる場合、resumability 診断を発行する。
+
 ---
 
