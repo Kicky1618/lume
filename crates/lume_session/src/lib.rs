@@ -43,12 +43,50 @@ impl FromStr for BuildTarget {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum ActivationMode {
+    #[default]
+    Hydrate,
+    PartialHydrate,
+    Resume,
+}
+
+impl ActivationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hydrate => "hydrate",
+            Self::PartialHydrate => "partial-hydrate",
+            Self::Resume => "resume",
+        }
+    }
+
+    pub fn is_resume(self) -> bool {
+        matches!(self, Self::Resume)
+    }
+}
+
+impl FromStr for ActivationMode {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "hydrate" => Ok(Self::Hydrate),
+            "partial-hydrate" | "partial_hydrate" => Ok(Self::PartialHydrate),
+            "resume" => Ok(Self::Resume),
+            other => Err(format!(
+                "unknown activation mode `{other}`; expected `hydrate`, `partial-hydrate`, or `resume`"
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BuildOptions {
     pub project_name: String,
     pub entry: PathBuf,
     pub out_dir: PathBuf,
     pub target: BuildTarget,
+    pub activation: ActivationMode,
 }
 
 impl Default for BuildOptions {
@@ -58,6 +96,7 @@ impl Default for BuildOptions {
             entry: PathBuf::from("src/app.lume"),
             out_dir: PathBuf::from("dist"),
             target: BuildTarget::default(),
+            activation: ActivationMode::default(),
         }
     }
 }
@@ -126,6 +165,9 @@ impl BuildOptions {
                         }
                     };
                 }
+                ("frontend", "activation") => {
+                    options.activation = value.parse().map_err(invalid_data)?;
+                }
                 _ => {}
             }
         }
@@ -153,7 +195,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildOptions, BuildTarget};
+    use super::{ActivationMode, BuildOptions, BuildTarget};
     use std::fs;
 
     #[test]
@@ -172,5 +214,39 @@ mod tests {
         assert_eq!(options.project_name, "demo");
         assert_eq!(options.target, BuildTarget::HtmlJsCssWasm);
         assert!(options.target.wasm_enabled());
+    }
+
+    #[test]
+    fn parses_activation_mode_resume() {
+        let path = std::env::temp_dir().join(format!(
+            "lume-session-activation-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "[project]\nname = \"app\"\n\n[frontend]\nactivation = \"resume\"\n",
+        )
+        .expect("write config");
+
+        let options = BuildOptions::from_toml_file(&path).expect("parse config");
+        fs::remove_file(path).ok();
+
+        assert_eq!(options.activation, ActivationMode::Resume);
+        assert!(options.activation.is_resume());
+    }
+
+    #[test]
+    fn parses_activation_mode_defaults_to_hydrate() {
+        let path = std::env::temp_dir().join(format!(
+            "lume-session-activation-default-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, "[project]\nname = \"app\"\n").expect("write config");
+
+        let options = BuildOptions::from_toml_file(&path).expect("parse config");
+        fs::remove_file(path).ok();
+
+        assert_eq!(options.activation, ActivationMode::Hydrate);
+        assert!(!options.activation.is_resume());
     }
 }

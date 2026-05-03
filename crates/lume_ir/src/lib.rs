@@ -1,9 +1,38 @@
 use lume_ast::*;
 use lume_diagnostics::{Diagnostic, Diagnostics};
-use lume_hir::HirProgram;
+use lume_hir::{
+    ActionId, CaptureId, ChunkId, HirProgram, ResumeBoundary, ResumeBoundaryId, ResumeFallback,
+    ResumeSymbol, ResumeSymbolId, StateScopeId,
+};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+
+/// Serialized snapshot of a single state scope used in resume mode.
+#[derive(Clone, Debug)]
+pub struct SerializedStateScope {
+    pub id: StateScopeId,
+    /// JSON-encoded initial value for each state variable (name -> json_value).
+    pub values: Vec<(String, String)>,
+}
+
+/// An event binding entry in the resume manifest.
+#[derive(Clone, Debug)]
+pub struct ResumeEventBinding {
+    pub node_id: String,
+    pub event: String,
+    pub symbol_id: ResumeSymbolId,
+    pub state_scope_id: StateScopeId,
+}
+
+/// The full resume graph derived from a component at IR level.
+#[derive(Clone, Debug, Default)]
+pub struct ResumeGraph {
+    pub boundaries: Vec<ResumeBoundary>,
+    pub symbols: Vec<ResumeSymbol>,
+    pub event_bindings: Vec<ResumeEventBinding>,
+    pub serialized_state: Vec<SerializedStateScope>,
+}
 
 #[derive(Clone, Debug)]
 pub struct LumeProgram {
@@ -19,6 +48,7 @@ pub struct LumeProgram {
     pub ffi_structs: Vec<FfiStructDecl>,
     pub ffi_enums: Vec<FfiEnumDecl>,
     pub ffi_opaques: Vec<FfiOpaqueDecl>,
+    pub resume_graph: ResumeGraph,
 }
 
 #[derive(Clone, Debug)]
@@ -129,6 +159,7 @@ pub fn build_with_base(
         return Err(diagnostics);
     }
     if let Some(component) = entry_component(program) {
+        let resume_graph = build_resume_graph(component, &mut diagnostics);
         return Ok(LumeProgram {
             component: component.clone(),
             components,
@@ -142,6 +173,7 @@ pub fn build_with_base(
             ffi_structs,
             ffi_enums,
             ffi_opaques,
+            resume_graph,
         });
     }
     diagnostics.push(Diagnostic::error(
@@ -898,6 +930,319 @@ fn substitute_template(raw: &str, props: &HashMap<String, Expr>) -> String {
 
 fn is_string_literal(raw: &str) -> bool {
     (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
+}
+
+/// Non-serializable type patterns — types that cannot be serialized as JSON.
+fn is_non_serializable_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "Function"
+            | "Dom"
+            | "Promise"
+            | "AbortController"
+            | "Stream"
+            | "Handle"
+            | "FfiPointer"
+    ) || ty.starts_with("fn(")
+        || ty.starts_with("Fn(")
+        || ty.starts_with("async fn(")
+}
+
+/// Collect all action names referenced inside an event handler body.
+fn actions_in_block(block: &Block, action_names: &HashSet<String>) -> Vec<String> {
+    let mut found = Vec::new();
+    for stmt in &block.statements {
+        match stmt {
+            Stmt::Expr(expr) => {
+                let raw = expr.raw.trim();
+                // call like `actionName()` or `actionName(args)`
+                let name = raw.split('(').next().unwrap_or("").trim();
+                if action_names.contains(name) && !found.contains(&name.to_string()) {
+                    found.push(name.to_string());
+                }
+            }
+            Stmt::Assign { expr, .. } => {
+                let raw = expr.raw.trim();
+                let name = raw.split('(').next().unwrap_or("").trim();
+                if action_names.contains(name) && !found.contains(&name.to_string()) {
+                    found.push(name.to_string());
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Collect state names referenced by a block (assignment targets + expression reads).
+fn state_captures_in_block(block: &Block, state_names: &HashSet<String>) -> Vec<String> {
+    let mut found = Vec::new();
+    for stmt in &block.statements {
+        match stmt {
+            Stmt::Assign { target, expr, .. } => {
+                if state_names.contains(target.as_str()) && !found.contains(target) {
+                    found.push(target.clone());
+                }
+                for token in expr.raw.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                    if state_names.contains(token) && !found.contains(&token.to_string()) {
+                        found.push(token.to_string());
+                    }
+                }
+            }
+            Stmt::Expr(expr) => {
+                for token in expr.raw.split(|c: char| !c.is_alphanumeric() && c != '_') {
+                    if state_names.contains(token) && !found.contains(&token.to_string()) {
+                        found.push(token.to_string());
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Convert a Lume-syntax initial value expression to a best-effort JSON value.
+fn initial_to_json(expr: &Expr) -> String {
+    let raw = expr.raw.trim();
+    if raw == "true" || raw == "false" || raw == "null" {
+        return raw.to_string();
+    }
+    if raw.parse::<f64>().is_ok() {
+        return raw.to_string();
+    }
+    if (raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))
+    {
+        let inner = &raw[1..raw.len() - 1];
+        return format!("\"{}\"", inner.replace('\\', "\\\\").replace('"', "\\\""));
+    }
+    if raw.starts_with('[') || raw.starts_with('{') {
+        return raw.to_string();
+    }
+    format!("\"{}\"", raw.replace('"', "\\\""))
+}
+
+/// Collect all event nodes from a view block.
+fn collect_events_in_view(view: &ViewBlock) -> Vec<(&EventNode, String)> {
+    let mut events = Vec::new();
+    collect_events_recursive(&view.nodes, &mut events);
+    events
+}
+
+fn collect_events_recursive<'a>(
+    nodes: &'a [ViewNode],
+    out: &mut Vec<(&'a EventNode, String)>,
+) {
+    for node in nodes {
+        match node {
+            ViewNode::Element(element) => {
+                if let Some(children) = &element.children {
+                    // Direct event children of this element
+                    for child in &children.nodes {
+                        if let ViewNode::Event(event) = child {
+                            out.push((event, element.name.clone()));
+                        }
+                    }
+                    collect_events_recursive(&children.nodes, out);
+                }
+            }
+            ViewNode::If(node) => {
+                collect_events_recursive(&node.then_block.nodes, out);
+                if let Some(else_block) = &node.else_block {
+                    collect_events_recursive(&else_block.nodes, out);
+                }
+            }
+            ViewNode::For(node) => {
+                collect_events_recursive(&node.body.nodes, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Build the resume graph for a component, emitting diagnostics for resumability violations.
+pub fn build_resume_graph(component: &ComponentDecl, diagnostics: &mut Diagnostics) -> ResumeGraph {
+    let state_names: HashSet<String> = component
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ComponentItem::State(state) = item {
+                Some(state.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let action_names: HashSet<String> = component
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ComponentItem::Action(action) = item {
+                Some(action.name.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Check for non-serializable state types (LUME1021)
+    for item in &component.items {
+        if let ComponentItem::State(state) = item {
+            if is_non_serializable_type(&state.ty) {
+                diagnostics.push(Diagnostic::warning(
+                    "LUME1021",
+                    format!(
+                        "captured value `{}` of type `{}` is not serializable; resumability may be impaired",
+                        state.name, state.ty
+                    ),
+                    Some(state.span),
+                ));
+            }
+        }
+    }
+
+    // Build serialized state scope
+    let scope_id = StateScopeId("s0".to_string());
+    let state_values: Vec<(String, String)> = component
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let ComponentItem::State(state) = item {
+                Some((state.name.clone(), initial_to_json(&state.init)))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let serialized_state = if state_values.is_empty() {
+        Vec::new()
+    } else {
+        vec![SerializedStateScope {
+            id: scope_id.clone(),
+            values: state_values,
+        }]
+    };
+
+    // Collect all event bindings from the view
+    let view = component.items.iter().find_map(|item| {
+        if let ComponentItem::View(view) = item {
+            Some(view)
+        } else {
+            None
+        }
+    });
+
+    let mut symbols: Vec<ResumeSymbol> = Vec::new();
+    let mut event_bindings: Vec<ResumeEventBinding> = Vec::new();
+    let mut symbol_idx: usize = 0;
+    let mut node_idx: usize = 2; // n2 etc. (n1 is typically for text bindings)
+
+    if let Some(view) = view {
+        let events = collect_events_in_view(view);
+        for (event_node, element_name) in events {
+            // Determine action symbol name
+            let actions_called = actions_in_block(&event_node.body, &action_names);
+            let captures = state_captures_in_block(&event_node.body, &state_names);
+
+            let symbol_name = if let Some(action_name) = actions_called.first() {
+                let component_lower = component.name.to_lowercase();
+                format!(
+                    "sym_{}_{}",
+                    component_lower,
+                    action_name.to_lowercase()
+                )
+            } else {
+                let component_lower = component.name.to_lowercase();
+                let element_lower = element_name.to_lowercase();
+                format!("sym_{}_{}_{}", component_lower, element_lower, symbol_idx)
+            };
+
+            let symbol_id = ResumeSymbolId(symbol_name.clone());
+            let node_id = format!("n{node_idx}");
+            node_idx += 1;
+            symbol_idx += 1;
+
+            let chunk_id = ChunkId(format!(
+                "/assets/chunks/{}.js",
+                symbol_name.replace("sym_", "")
+            ));
+
+            let capture_ids = captures
+                .iter()
+                .map(|name| CaptureId(format!("{}.{}", scope_id.0, name)))
+                .collect::<Vec<_>>();
+
+            // Determine action id
+            let action_id = actions_called
+                .first()
+                .map(|name| ActionId(name.clone()))
+                .unwrap_or_else(|| ActionId(symbol_name.clone()));
+
+            symbols.push(ResumeSymbol {
+                id: symbol_id.clone(),
+                event: Some(event_node.event.clone()),
+                action: action_id,
+                captures: capture_ids,
+                chunk: Some(chunk_id),
+                wasm_export: None,
+            });
+
+            event_bindings.push(ResumeEventBinding {
+                node_id,
+                event: event_node.event.clone(),
+                symbol_id,
+                state_scope_id: scope_id.clone(),
+            });
+        }
+    }
+
+    // Check for top-level side effects in state init (LUME1023)
+    for item in &component.items {
+        if let ComponentItem::State(state) = item {
+            let raw = state.init.raw.trim();
+            // A call expression in a state init is a side effect
+            if raw.contains('(') && !raw.starts_with('[') && !raw.starts_with('{') {
+                diagnostics.push(Diagnostic::warning(
+                    "LUME1023",
+                    format!(
+                        "state `{}` initializer `{}` may be a top-level side effect that prevents resumability",
+                        state.name, raw
+                    ),
+                    Some(state.init.span),
+                ));
+            }
+        }
+    }
+
+    // Build the single boundary for the component
+    let boundary = ResumeBoundary {
+        id: ResumeBoundaryId("b0".to_string()),
+        root_node: "c0".to_string(),
+        state_scopes: if serialized_state.is_empty() {
+            Vec::new()
+        } else {
+            vec![scope_id]
+        },
+        symbols: symbols.iter().map(|s| s.id.clone()).collect(),
+        fallback: ResumeFallback::HydrateBoundary,
+    };
+
+    // If there are events but no state boundary could be inferred (no state), warn (LUME1020)
+    if !event_bindings.is_empty() && serialized_state.is_empty() {
+        diagnostics.push(Diagnostic::warning(
+            "LUME1020",
+            "resumable boundary cannot be inferred: component has event handlers but no serializable state",
+            Some(component.span),
+        ));
+    }
+
+    ResumeGraph {
+        boundaries: vec![boundary],
+        symbols,
+        event_bindings,
+        serialized_state,
+    }
 }
 
 #[cfg(test)]

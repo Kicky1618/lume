@@ -1,6 +1,6 @@
 use lume_ast::*;
 use lume_codegen_css::{layout_class, style_class_for, style_ref_class};
-use lume_ir::LumeProgram;
+use lume_ir::{LumeProgram, ResumeGraph};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -28,6 +28,10 @@ pub struct EventBinding {
 }
 
 pub fn generate(program: &LumeProgram) -> HtmlOutput {
+    generate_with_resume(program, false)
+}
+
+pub fn generate_with_resume(program: &LumeProgram, resume: bool) -> HtmlOutput {
     let mut ctx = Ctx {
         next_node: 1,
         next_event: 0,
@@ -37,21 +41,53 @@ pub fn generate(program: &LumeProgram) -> HtmlOutput {
         locals: HashMap::new(),
         state: initial_state(program),
         component_stack: Vec::new(),
+        resume_mode: resume,
+        resume_event_idx: 0,
     };
     let body = program
         .view()
         .map(|view| render_view(view, &mut ctx, program))
         .unwrap_or_default();
+
+    // Build serialized state script block for resume mode
+    let state_script = if resume {
+        build_state_script(&program.resume_graph)
+    } else {
+        String::new()
+    };
+
+    // Root element: in resume mode add data-lume-r boundary marker
+    let root_extra = if resume { " data-lume-r=\"b0\"" } else { "" };
+
     let html = format!(
-        "<!doctype html>\n<html lang=\"ja\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Lume App</title>\n    <link rel=\"stylesheet\" href=\"/assets/style.css\">\n    <script type=\"module\" src=\"/assets/app.js\"></script>\n  </head>\n  <body>\n    <div id=\"lume-root\" data-lume-component=\"{}\" data-lume-id=\"c0\">\n{}    </div>\n  </body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"ja\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Lume App</title>\n    <link rel=\"stylesheet\" href=\"/assets/style.css\">\n    <script type=\"module\" src=\"/assets/app.js\"></script>\n  </head>\n  <body>\n    <div id=\"lume-root\" data-lume-component=\"{}\" data-lume-id=\"c0\"{}>\n{}    </div>\n{}  </body>\n</html>\n",
         escape_attr(&program.component.name),
-        indent(&body, 6)
+        root_extra,
+        indent(&body, 6),
+        state_script,
     );
     HtmlOutput {
         html,
         bindings: ctx.bindings,
         events: ctx.events,
     }
+}
+
+/// Build the inline `<script type="application/lume-state">` blocks.
+fn build_state_script(resume_graph: &ResumeGraph) -> String {
+    let mut out = String::new();
+    for scope in &resume_graph.serialized_state {
+        let mut fields = Vec::new();
+        for (name, value) in &scope.values {
+            fields.push(format!("\"{}\":{}", name, value));
+        }
+        out.push_str(&format!(
+            "    <script type=\"application/lume-state\" id=\"lume-state-{}\">{{{}}}</script>\n",
+            scope.id.0,
+            fields.join(",")
+        ));
+    }
+    out
 }
 
 struct Ctx {
@@ -63,6 +99,8 @@ struct Ctx {
     locals: HashMap<String, Value>,
     state: HashMap<String, Value>,
     component_stack: Vec<String>,
+    resume_mode: bool,
+    resume_event_idx: usize,
 }
 
 fn render_view(view: &ViewBlock, ctx: &mut Ctx, program: &LumeProgram) -> String {
@@ -159,12 +197,12 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
             });
             render_text_expr(&expr, ctx)
         }
-        "Button" => render_button(element, ctx),
-        "Input" => render_input(element, ctx),
+        "Button" => render_button(element, ctx, program),
+        "Input" => render_input(element, ctx, program),
         "Image" => render_image(element, ctx),
-        "Canvas" => render_canvas(element, ctx),
-        "NativeCanvas" => render_native_canvas(element, ctx),
-        "GpuCanvas" => render_gpu_canvas(element, ctx),
+        "Canvas" => render_canvas(element, ctx, program),
+        "NativeCanvas" => render_native_canvas(element, ctx, program),
+        "GpuCanvas" => render_gpu_canvas(element, ctx, program),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
         "Form" => render_form(element, ctx, program),
         "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
@@ -172,19 +210,19 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
     }
 }
 
-fn render_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
-    render_canvas_surface(element, ctx, String::new())
+fn render_canvas(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    render_canvas_surface(element, ctx, String::new(), program)
 }
 
-fn render_native_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
-    render_canvas_surface(element, ctx, native_canvas_attrs(element, ctx))
+fn render_native_canvas(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    render_canvas_surface(element, ctx, native_canvas_attrs(element, ctx), program)
 }
 
-fn render_gpu_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
-    render_canvas_surface(element, ctx, gpu_canvas_attrs(element, ctx))
+fn render_gpu_canvas(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    render_canvas_surface(element, ctx, gpu_canvas_attrs(element, ctx), program)
 }
 
-fn render_canvas_surface(element: &ElementNode, ctx: &mut Ctx, native_attrs: String) -> String {
+fn render_canvas_surface(element: &ElementNode, ctx: &mut Ctx, native_attrs: String, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let width = attr_value(element, "width")
         .map(|expr| eval_expr(expr, ctx).to_attr())
@@ -192,7 +230,7 @@ fn render_canvas_surface(element: &ElementNode, ctx: &mut Ctx, native_attrs: Str
     let height = attr_value(element, "height")
         .map(|expr| eval_expr(expr, ctx).to_attr())
         .unwrap_or_else(|| "360".into());
-    let event_attr = event_attr(element, ctx, &id);
+    let event_attr = event_attr(element, ctx, &id, program);
     let aria = attr_value(element, "ariaLabel")
         .or_else(|| attr_value(element, "aria-label"))
         .map(|expr| {
@@ -403,12 +441,12 @@ fn render_text_expr(expr: &Expr, ctx: &mut Ctx) -> String {
     )
 }
 
-fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_button(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let label = first_arg(element)
         .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
         .unwrap_or_default();
-    let event_attr = event_attr(element, ctx, &id);
+    let event_attr = event_attr(element, ctx, &id, program);
     let type_attr = attr_value(element, "type")
         .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
         .unwrap_or_default();
@@ -421,7 +459,7 @@ fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
     )
 }
 
-fn render_input(element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_input(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let value = attr_value(element, "value")
         .map(|e| format!(" value=\"{}\"", escape_attr(&eval_expr(e, ctx).to_attr())))
@@ -435,7 +473,7 @@ fn render_input(element: &ElementNode, ctx: &mut Ctx) -> String {
     let input_type = attr_value(element, "type")
         .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
         .unwrap_or_default();
-    let event_attr = event_attr(element, ctx, &id);
+    let event_attr = event_attr(element, ctx, &id, program);
     format!(
         "<input data-lume-id=\"{}\"{}{}{}{}{}>\n",
         id, event_attr, value, placeholder, name, input_type
@@ -573,7 +611,7 @@ fn find_event(view: &ViewBlock) -> Option<&EventNode> {
     })
 }
 
-fn event_attr(element: &ElementNode, ctx: &mut Ctx, node_id: &str) -> String {
+fn event_attr(element: &ElementNode, ctx: &mut Ctx, node_id: &str, program: &LumeProgram) -> String {
     let Some(event) = element.children.as_ref().and_then(find_event) else {
         return String::new();
     };
@@ -587,6 +625,38 @@ fn event_attr(element: &ElementNode, ctx: &mut Ctx, node_id: &str) -> String {
         loop_params: ctx.loop_params.clone(),
         statements: event.body.statements.clone(),
     });
+
+    if ctx.resume_mode {
+        // In resume mode, emit data-lume-on and data-lume-state instead of data-lume-event
+        let resume_idx = ctx.resume_event_idx;
+        ctx.resume_event_idx += 1;
+        let symbol_id = program
+            .resume_graph
+            .event_bindings
+            .get(resume_idx)
+            .map(|eb| eb.symbol_id.0.as_str())
+            .unwrap_or("sym_unknown");
+        let state_scope = program
+            .resume_graph
+            .event_bindings
+            .get(resume_idx)
+            .map(|eb| eb.state_scope_id.0.as_str())
+            .unwrap_or("s0");
+        let mut attr = format!(
+            " data-lume-on=\"{}:{}\" data-lume-state=\"{}\"",
+            escape_attr(&event.event),
+            escape_attr(symbol_id),
+            escape_attr(state_scope),
+        );
+        if !ctx.loop_params.is_empty() {
+            attr.push_str(&format!(
+                " data-lume-scope=\"{}\"",
+                escape_attr(&encode_scope(ctx))
+            ));
+        }
+        return attr;
+    }
+
     let mut attr = format!(
         " data-lume-event=\"{}:{}\"",
         escape_attr(&event.event),
@@ -1007,5 +1077,42 @@ component App {
         assert!(html.html.contains("data-lume-form-action=\"save\""));
         assert!(html.html.contains("name=\"message\""));
         assert!(html.html.contains("type=\"submit\""));
+    }
+
+    #[test]
+    fn resume_mode_adds_boundary_marker_and_state_script() {
+        let source = r#"
+component App {
+  state count: i32 = 0
+
+  action increment() {
+    count += 1
+  }
+
+  view {
+    Column {
+      Text("Count: {count}")
+      Button("増やす") {
+        on click {
+          increment()
+        }
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = super::generate_with_resume(&ir, true);
+        // Resume boundary marker on root element
+        assert!(html.html.contains("data-lume-r=\"b0\""));
+        // Serialized state script block
+        assert!(html.html.contains("application/lume-state"));
+        assert!(html.html.contains("\"count\":0"));
+        // data-lume-on attribute (resume event binding)
+        assert!(html.html.contains("data-lume-on=\"click:sym_app_increment\""));
+        // data-lume-state attribute
+        assert!(html.html.contains("data-lume-state=\"s0\""));
     }
 }

@@ -60,12 +60,14 @@ pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
         if !diagnostics.has_errors() {
             match lume_ir::build_with_base(&hir, options.entry.parent()) {
                 Ok(ir) => {
-                    let html = lume_codegen_html::generate(&ir);
+                    let resume = options.activation.is_resume();
+                    let html = lume_codegen_html::generate_with_resume(&ir, resume);
                     let css = lume_codegen_css::generate(&ir);
-                    let js = lume_codegen_js::generate_with_wasm(
+                    let js = lume_codegen_js::generate_with_options(
                         &ir,
                         &html,
                         options.target.wasm_enabled(),
+                        resume,
                     );
                     write_dist(&options, &ir, &html.html, &css, &js)?;
                     let mut emitted = vec![
@@ -1371,9 +1373,10 @@ fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"activation\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]{}\n}}\n",
         json_escape(&ir.component.name),
         options.target.as_str(),
+        options.activation.as_str(),
         backend_list(options),
         states,
         routes,
@@ -1385,7 +1388,80 @@ fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
         ffi,
         ffi_structs,
         ffi_enums,
-        ffi_opaques
+        ffi_opaques,
+        if options.activation.is_resume() {
+            format!(",\n  \"resumeGraph\": {}", resume_graph_json(&ir.resume_graph))
+        } else {
+            String::new()
+        }
+    )
+}
+
+fn resume_graph_json(graph: &lume_ir::ResumeGraph) -> String {
+    let symbols: Vec<String> = graph
+        .symbols
+        .iter()
+        .map(|sym| {
+            let captures = sym
+                .captures
+                .iter()
+                .map(|c| format!("\"{}\"", json_escape(&c.0)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "    \"{}\": {{ \"event\": {}, \"action\": \"{}\", \"captures\": [{}], \"chunk\": {}, \"wasmExport\": {}, \"boundary\": \"b0\" }}",
+                json_escape(&sym.id.0),
+                sym.event
+                    .as_ref()
+                    .map(|e| format!("\"{}\"", json_escape(e)))
+                    .unwrap_or_else(|| "null".into()),
+                json_escape(&sym.action.0),
+                captures,
+                sym.chunk
+                    .as_ref()
+                    .map(|c| format!("\"{}\"", json_escape(&c.0)))
+                    .unwrap_or_else(|| "null".into()),
+                sym.wasm_export
+                    .as_ref()
+                    .map(|e| format!("\"{}\"", json_escape(e)))
+                    .unwrap_or_else(|| "null".into()),
+            )
+        })
+        .collect();
+    let event_bindings: Vec<String> = graph
+        .event_bindings
+        .iter()
+        .map(|eb| {
+            format!(
+                "    {{ \"node\": \"{}\", \"event\": \"{}\", \"symbol\": \"{}\", \"state\": \"{}\" }}",
+                json_escape(&eb.node_id),
+                json_escape(&eb.event),
+                json_escape(&eb.symbol_id.0),
+                json_escape(&eb.state_scope_id.0),
+            )
+        })
+        .collect();
+    let serialized_state: Vec<String> = graph
+        .serialized_state
+        .iter()
+        .map(|scope| {
+            let fields: Vec<String> = scope
+                .values
+                .iter()
+                .map(|(name, value)| format!("\"{}\":{}", json_escape(name), value))
+                .collect();
+            format!(
+                "    \"{}\": {{{}}}",
+                json_escape(&scope.id.0),
+                fields.join(",")
+            )
+        })
+        .collect();
+    format!(
+        "{{\n  \"symbols\": {{\n{}\n  }},\n  \"eventBindings\": [\n{}\n  ],\n  \"serializedState\": {{\n{}\n  }}\n}}",
+        symbols.join(",\n"),
+        event_bindings.join(",\n"),
+        serialized_state.join(",\n"),
     )
 }
 

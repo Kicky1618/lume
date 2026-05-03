@@ -9,6 +9,255 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
 }
 
 pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled: bool) -> String {
+    generate_with_options(program, html, wasm_enabled, false)
+}
+
+pub fn generate_with_options(
+    program: &LumeProgram,
+    html: &HtmlOutput,
+    wasm_enabled: bool,
+    resume: bool,
+) -> String {
+    if resume {
+        return generate_resume_runtime(program, html, wasm_enabled);
+    }
+    generate_hydrate_runtime(program, html, wasm_enabled)
+}
+
+/// Generate the resume-mode JavaScript runtime.
+/// Instead of eagerly importing all event handlers, event handlers are lazily loaded from
+/// the manifest when the user first interacts with a component.
+fn generate_resume_runtime(program: &LumeProgram, html: &HtmlOutput, wasm_enabled: bool) -> String {
+    let state_names = program
+        .states()
+        .map(|state| state.name.clone())
+        .collect::<HashSet<_>>();
+
+    let mut js = String::new();
+
+    // Fallback state (used if serialized state is unavailable)
+    js.push_str("const fallbackState = {\n");
+    for state in program.states() {
+        js.push_str(&format!(
+            "  {}: {},\n",
+            state.name,
+            js_expr(&state.init, &HashSet::new(), &HashSet::new())
+        ));
+    }
+    js.push_str("};\n\n");
+    js.push_str("const state = {};\n\n");
+
+    if wasm_enabled {
+        js.push_str("const lumeWasm = await loadLumeWasm();\n\n");
+        js.push_str("async function loadLumeWasm() {\n");
+        js.push_str("  const fallback = { enabled: false, exports: {}, error: null };\n");
+        js.push_str("  try {\n");
+        js.push_str("    const source = \"/assets/app.wasm\";\n");
+        js.push_str("    const imports = { env: {} };\n");
+        js.push_str("    let instance;\n");
+        js.push_str("    if (WebAssembly.instantiateStreaming) {\n");
+        js.push_str("      try {\n");
+        js.push_str("        ({ instance } = await WebAssembly.instantiateStreaming(fetch(source), imports));\n");
+        js.push_str("      } catch (_) {}\n");
+        js.push_str("    }\n");
+        js.push_str("    if (!instance) {\n");
+        js.push_str("      const bytes = await fetch(source).then(response => response.arrayBuffer());\n");
+        js.push_str("      ({ instance } = await WebAssembly.instantiate(bytes, imports));\n");
+        js.push_str("    }\n");
+        js.push_str("    instance.exports.lume_init?.(0, 0);\n");
+        js.push_str("    return { enabled: true, exports: instance.exports, error: null };\n");
+        js.push_str("  } catch (error) {\n");
+        js.push_str("    console.warn(\"Lume WASM runtime could not be loaded; continuing with JavaScript runtime.\", error);\n");
+        js.push_str("    return { ...fallback, error };\n");
+        js.push_str("  }\n");
+        js.push_str("}\n\n");
+    }
+
+    if !program.server_actions.is_empty() {
+        js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"dev-csrf-token\";\n\n");
+        js.push_str("const serverActionParams = {\n");
+        for action in &program.server_actions {
+            let params = action
+                .params
+                .iter()
+                .map(|param| format!("{:?}", param.name))
+                .collect::<Vec<_>>()
+                .join(", ");
+            js.push_str(&format!("  {:?}: [{}],\n", action.name, params));
+        }
+        js.push_str("};\n\n");
+        js.push_str("async function callServerAction(id, args) {\n");
+        js.push_str("  const response = await fetch(`/__lume/actions/${encodeURIComponent(id)}`, {\n");
+        js.push_str("    method: \"POST\",\n");
+        js.push_str("    headers: { \"content-type\": \"application/json\", \"x-lume-csrf\": lumeCsrfToken },\n");
+        js.push_str("    body: JSON.stringify({ args })\n");
+        js.push_str("  });\n");
+        js.push_str("  const payload = await response.json().catch(() => ({}));\n");
+        js.push_str("  if (!response.ok) throw new Error(payload.error || `Server Action ${id} failed`);\n");
+        js.push_str("  for (const key of payload.revalidate || []) lumeQueryCache.invalidate(key);\n");
+        js.push_str("  return payload.value;\n");
+        js.push_str("}\n\n");
+        for action in &program.server_actions {
+            js.push_str(&format!(
+                "async function {}(...args) {{\n  return callServerAction({:?}, args);\n}}\n\n",
+                action.name, action.name
+            ));
+        }
+    }
+
+    // Action implementations (inline, for the resume runtime to call after loading)
+    js.push_str(&component_actions_js(program, &state_names));
+
+    // Serialized state restoration from inline <script> blocks in the DOM
+    js.push_str("async function restoreResumeState() {\n");
+    js.push_str("  Object.assign(state, fallbackState);\n");
+    js.push_str("  // Restore from inline serialized state scripts\n");
+    js.push_str("  for (const script of document.querySelectorAll('script[type=\"application/lume-state\"]')) {\n");
+    js.push_str("    try {\n");
+    js.push_str("      const data = JSON.parse(script.textContent || \"{}\");\n");
+    js.push_str("      Object.assign(state, data);\n");
+    js.push_str("    } catch (_) {}\n");
+    js.push_str("  }\n");
+    js.push_str("  // Also try fetching manifest for additional state\n");
+    js.push_str("  try {\n");
+    js.push_str("    const response = await fetch(\"/assets/lume.manifest.json\");\n");
+    js.push_str("    if (!response.ok) return;\n");
+    js.push_str("    const manifest = await response.json();\n");
+    js.push_str("    for (const item of manifest.state || []) {\n");
+    js.push_str("      if (!(item.name in state)) state[item.name] = item.initial;\n");
+    js.push_str("    }\n");
+    js.push_str("  } catch (_) {}\n");
+    js.push_str("}\n\n");
+
+    // Resume manifest and symbol loader
+    js.push_str("let lumeManifest = null;\n");
+    js.push_str("const lumeSymbolCache = new Map();\n\n");
+    js.push_str("async function loadLumeManifest() {\n");
+    js.push_str("  if (lumeManifest) return lumeManifest;\n");
+    js.push_str("  try {\n");
+    js.push_str("    const response = await fetch(\"/assets/lume.manifest.json\");\n");
+    js.push_str("    lumeManifest = response.ok ? await response.json() : {};\n");
+    js.push_str("  } catch (_) { lumeManifest = {}; }\n");
+    js.push_str("  return lumeManifest;\n");
+    js.push_str("}\n\n");
+    js.push_str("async function loadSymbol(symbolId) {\n");
+    js.push_str("  if (lumeSymbolCache.has(symbolId)) return lumeSymbolCache.get(symbolId);\n");
+    js.push_str("  const manifest = await loadLumeManifest();\n");
+    js.push_str("  const symbols = manifest.resumeGraph?.symbols || {};\n");
+    js.push_str("  const symbolMeta = symbols[symbolId];\n");
+    js.push_str("  if (!symbolMeta) return null;\n");
+    js.push_str("  // The inline actions object already contains the symbol implementations\n");
+    js.push_str("  const fn = lumeResumeActions[symbolId];\n");
+    js.push_str("  if (fn) { lumeSymbolCache.set(symbolId, fn); return fn; }\n");
+    js.push_str("  return null;\n");
+    js.push_str("}\n\n");
+
+    // DOM node lookup and patch application
+    let root = "document.getElementById(\"lume-root\")";
+    js.push_str(&format!("const root = {};\n\n", root));
+
+    js.push_str("function applyDomPatches(patches) {\n");
+    js.push_str("  for (const patch of patches || []) {\n");
+    js.push_str("    const node = root.querySelector(`[data-lume-id=\"${patch.id}\"]`);\n");
+    js.push_str("    if (!node) continue;\n");
+    js.push_str("    if (patch.type === \"text\") node.textContent = patch.value;\n");
+    js.push_str("    else if (patch.type === \"attr\") node.setAttribute(patch.name, patch.value);\n");
+    js.push_str("  }\n");
+    js.push_str("}\n\n");
+
+    // Text node update functions for resume mode
+    if !html.bindings.is_empty() {
+        js.push_str("const resumeNodes = {\n");
+        for binding in &html.bindings {
+            js.push_str(&format!(
+                "  {}: root.querySelector('[data-lume-id=\"{}\"]'),\n",
+                binding.node_id, binding.node_id
+            ));
+        }
+        js.push_str("};\n\n");
+        for binding in &html.bindings {
+            let render_name = format!("render_{}", binding.node_id);
+            js.push_str(&format!("function {render_name}() {{\n"));
+            js.push_str(&format!(
+                "  if (resumeNodes.{}) resumeNodes.{}.textContent = {};\n",
+                binding.node_id,
+                binding.node_id,
+                template_expr(&binding.template, &state_names)
+            ));
+            js.push_str("}\n\n");
+        }
+        js.push_str("function resume_render_all() {\n");
+        for binding in &html.bindings {
+            js.push_str(&format!("  render_{}();\n", binding.node_id));
+        }
+        js.push_str("}\n\n");
+    } else {
+        js.push_str("function resume_render_all() {}\n\n");
+    }
+
+    // Inline resume action lookup (all actions by symbol id for fast dispatch)
+    js.push_str("const lumeResumeActions = {\n");
+    for sym in &program.resume_graph.symbols {
+        let action_name = sym.action.0.as_str();
+        js.push_str(&format!("  {:?}: {action_name},\n", sym.id.0));
+    }
+    js.push_str("};\n\n");
+
+    // Delegated global event listener
+    let event_names: BTreeSet<String> = program
+        .resume_graph
+        .event_bindings
+        .iter()
+        .map(|eb| eb.event.clone())
+        .collect();
+    for event_name in &event_names {
+        js.push_str(&format!(
+            "root.addEventListener(\"{event_name}\", async event => {{\n"
+        ));
+        js.push_str("  const target = event.target.closest(\"[data-lume-on]\");\n");
+        js.push_str("  if (!target) return;\n");
+        js.push_str("  const spec = target.getAttribute(\"data-lume-on\") || \"\";\n");
+        js.push_str("  const [evtType, symbolId] = spec.split(\":\", 2);\n");
+        js.push_str(&format!("  if (evtType !== \"{event_name}\") return;\n"));
+        js.push_str("  const fn = await loadSymbol(symbolId);\n");
+        js.push_str("  if (!fn) { console.warn(`[lume] symbol '${symbolId}' not found`); return; }\n");
+        js.push_str("  await fn(event, target);\n");
+        js.push_str("  resume_render_all();\n");
+        js.push_str("});\n\n");
+    }
+
+    // Also register non-resume event listeners for any HTML events not covered by resume graph
+    // (for compatibility with static html bindings)
+    let html_event_names = html
+        .events
+        .iter()
+        .map(|event| event.event.as_str())
+        .collect::<BTreeSet<_>>();
+    let resume_event_names_set: BTreeSet<String> = event_names.clone();
+    for event_name in html_event_names {
+        if resume_event_names_set.contains(event_name) {
+            continue;
+        }
+        js.push_str(&format!(
+            "root.addEventListener(\"{event_name}\", event => {{\n"
+        ));
+        js.push_str("  const target = event.target.closest(\"[data-lume-event]\");\n");
+        js.push_str("  if (!target) return;\n");
+        js.push_str("  const eventSpec = target.getAttribute(\"data-lume-event\");\n");
+        for event in html.events.iter().filter(|ev| ev.event == event_name) {
+            js.push_str(&format!(
+                "  if (eventSpec === \"{}:{}\") void actions[{}](event, target);\n",
+                event.event, event.id, event.id
+            ));
+        }
+        js.push_str("});\n\n");
+    }
+
+    js.push_str("await restoreResumeState();\n");
+    js
+}
+
+fn generate_hydrate_runtime(program: &LumeProgram, html: &HtmlOutput, wasm_enabled: bool) -> String {
     let state_names = program
         .states()
         .map(|state| state.name.clone())
