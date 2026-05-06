@@ -78,6 +78,8 @@ pub struct StateDecl {
 pub struct ActionDecl {
     pub name: String,
     pub params: Vec<Param>,
+    pub return_ty: Option<String>,
+    pub concurrency: Option<String>,
     pub body: Block,
     pub is_async: bool,
     pub span: Span,

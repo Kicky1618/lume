@@ -169,6 +169,7 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "Input" => render_input(element, ctx),
         "TextArea" => render_text_area(element, ctx),
         "Image" => render_image(element, ctx),
+        "Script" => render_script(element),
         "Canvas" => render_canvas(element, ctx),
         "NativeCanvas" => render_native_canvas(element, ctx),
         "GpuCanvas" => render_gpu_canvas(element, ctx),
@@ -560,6 +561,44 @@ fn render_image(element: &ElementNode, ctx: &mut Ctx) -> String {
     )
 }
 
+fn render_script(element: &ElementNode) -> String {
+    let Some(src) = attr_value(element, "src") else {
+        return String::new();
+    };
+    let src = src.raw.trim().trim_matches(['"', '\'']);
+    let ty = attr_value(element, "type")
+        .map(|expr| expr.raw.trim().trim_matches(['"', '\'']))
+        .unwrap_or("module");
+    let integrity = script_string_attr(element, "integrity", "integrity");
+    let crossorigin = script_string_attr(element, "crossorigin", "crossorigin")
+        .or_else(|| script_string_attr(element, "crossOrigin", "crossorigin"))
+        .unwrap_or_default();
+    let referrer_policy = script_string_attr(element, "referrerPolicy", "referrerpolicy")
+        .or_else(|| script_string_attr(element, "referrerpolicy", "referrerpolicy"))
+        .unwrap_or_default();
+    let nonce = script_string_attr(element, "nonce", "nonce");
+    format!(
+        "<script type=\"{}\" src=\"{}\"{}{}{}{}{}{}></script>\n",
+        escape_attr(ty),
+        escape_attr(src),
+        bool_attr(element, "async"),
+        bool_attr(element, "defer"),
+        integrity.unwrap_or_default(),
+        crossorigin,
+        referrer_policy,
+        nonce.unwrap_or_default()
+    )
+}
+
+fn script_string_attr(element: &ElementNode, source_name: &str, html_name: &str) -> Option<String> {
+    attr_value(element, source_name).map(|expr| {
+        format!(
+            " {html_name}=\"{}\"",
+            escape_attr(expr.raw.trim().trim_matches(['"', '\'']))
+        )
+    })
+}
+
 fn render_link(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let href = attr_value(element, "to")
@@ -618,19 +657,45 @@ fn render_form(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> S
         })
         .map(|name| format!(" data-lume-form-action=\"{}\"", escape_attr(name)))
         .unwrap_or_default();
+    let enctype_attr = attr_value(element, "enctype")
+        .map(|e| format!(" enctype=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .or_else(|| {
+            action
+                .as_ref()
+                .filter(|name| action_accepts_file_upload(program, name))
+                .map(|_| " enctype=\"multipart/form-data\"".to_string())
+        })
+        .unwrap_or_default();
     let children = element
         .children
         .as_ref()
         .map(|view| render_view(view, ctx, program))
         .unwrap_or_default();
     format!(
-        "<form data-lume-id=\"{}\" method=\"{}\"{}{}>\n{}</form>\n",
+        "<form data-lume-id=\"{}\" method=\"{}\"{}{}{}>\n{}</form>\n",
         id,
         escape_attr(&method),
         action_attr,
         form_action_attr,
+        enctype_attr,
         indent(&children, 2)
     )
+}
+
+fn action_accepts_file_upload(program: &LumeProgram, name: &str) -> bool {
+    program
+        .server_actions
+        .iter()
+        .find(|action| action.name == name)
+        .is_some_and(|action| {
+            action.params.iter().any(|param| {
+                let ty = param.ty.trim();
+                ty == "File"
+                    || ty == "FormData"
+                    || ty.ends_with("File[]")
+                    || ty.contains("Array<File>")
+            })
+        })
 }
 
 fn render_outlet(_element: &ElementNode, ctx: &mut Ctx) -> String {
@@ -829,7 +894,7 @@ fn aria_label_attr(element: &ElementNode, ctx: &Ctx) -> String {
 }
 
 fn bool_attr(element: &ElementNode, name: &str) -> String {
-    element
+    let has_named_attr = element
         .attrs
         .iter()
         .find(|attr| attr.name == name)
@@ -837,7 +902,18 @@ fn bool_attr(element: &ElementNode, name: &str) -> String {
             Some(value) if matches!(value.raw.trim(), "false" | "\"false\"") => None,
             _ => Some(format!(" {name}")),
         })
-        .unwrap_or_default()
+        .or_else(|| {
+            element.args.iter().find_map(|arg| match arg {
+                Arg::Named(arg_name, value)
+                    if arg_name == name && !matches!(value.raw.trim(), "false" | "\"false\"") =>
+                {
+                    Some(format!(" {name}"))
+                }
+                Arg::Positional(value) if value.raw.trim() == name => Some(format!(" {name}")),
+                _ => None,
+            })
+        });
+    has_named_attr.unwrap_or_default()
 }
 
 fn style_classes(element: &ElementNode) -> Vec<String> {
@@ -1386,6 +1462,29 @@ component App {
     }
 
     #[test]
+    fn server_renders_file_action_forms_with_multipart_enctype() {
+        let source = r#"
+server action upload(file: File): URL {
+  return file.name
+}
+
+component App {
+  view {
+    Form action=upload method="post" {
+      Input(name="file", label="File", type="file")
+      Button("Upload", type="submit")
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate(&ir);
+        assert!(html.html.contains("enctype=\"multipart/form-data\""));
+    }
+
+    #[test]
     fn renders_documented_standard_elements() {
         let source = r#"
 component App {
@@ -1402,6 +1501,7 @@ component App {
       }
       Text("Title", as="h1", size=24, weight=700)
       TextArea(value=note, label="Note")
+      Script(src="/assets/widget.js", defer)
       Modal(title="Details", open) {
         Dialog(title="Inner") {
           VisuallyHidden("Hidden title")
@@ -1433,6 +1533,9 @@ component App {
         let html = generate(&ir);
         assert!(html.html.contains("<h1"));
         assert!(html.html.contains("class=\"l-container\""));
+        assert!(html
+            .html
+            .contains("<script type=\"module\" src=\"/assets/widget.js\" defer></script>"));
         assert!(html.html.contains("class=\"l-router\""));
         assert!(html.html.contains("class=\"l-route\""));
         assert!(html.html.contains("<textarea"));

@@ -21,6 +21,23 @@ struct Parser {
     diagnostics: Diagnostics,
 }
 
+const SERVER_ACTION_MODIFIER_STOPS: &[&str] = &[
+    "{",
+    "validate",
+    "auth",
+    "csrf",
+    "rateLimit",
+    "revalidate",
+    "transaction",
+    "runtime",
+    "invalidates",
+    "maxBodySize",
+];
+
+fn block_server_modifier(name: &str) -> bool {
+    matches!(name, "validate" | "rateLimit")
+}
+
 impl Parser {
     fn program(&mut self) -> Program {
         let start = self.current().span.start;
@@ -50,6 +67,12 @@ impl Parser {
         if self.eat_keyword("export") {
             let inner = self.decl()?;
             return Some(Decl::Export(Box::new(inner)));
+        }
+        if self.eat_identish("raw") {
+            return Some(Decl::Reserved(self.raw_javascript_decl("raw")));
+        }
+        if self.eat_identish("script") {
+            return Some(Decl::Reserved(self.raw_javascript_decl("script")));
         }
         if self.eat_keyword("component") {
             return self.component_like("component").map(Decl::Component);
@@ -145,7 +168,11 @@ impl Parser {
         self.expect_symbol('{');
         let mut items = Vec::new();
         while !self.at_eof() && !self.eat_symbol('}') {
-            if self.eat_keyword("state") {
+            if self.eat_identish("raw") {
+                items.push(ComponentItem::Reserved(self.raw_javascript_decl("raw")));
+            } else if self.eat_identish("script") {
+                items.push(ComponentItem::Reserved(self.raw_javascript_decl("script")));
+            } else if self.eat_keyword("state") {
                 if let Some(state) = self.state_decl() {
                     items.push(ComponentItem::State(state));
                 }
@@ -216,10 +243,28 @@ impl Parser {
         } else {
             Vec::new()
         };
+        let return_ty = if self.eat_symbol(':') {
+            let raw = self.collect_raw_until(&["{", "concurrency"]);
+            let raw = raw.trim().to_string();
+            (!raw.is_empty()).then_some(raw)
+        } else {
+            None
+        };
+        let mut concurrency = None;
+        while !self.at_eof() && !self.check_symbol('{') {
+            if self.eat_identish("concurrency") {
+                self.eat_operator("=");
+                concurrency = Some(self.string_or_raw_atom());
+            } else {
+                self.advance();
+            }
+        }
         let body = self.block()?;
         Some(ActionDecl {
             name,
             params,
+            return_ty,
+            concurrency,
             body,
             is_async,
             span: Span::new(start, self.previous().span.end),
@@ -235,18 +280,7 @@ impl Parser {
             Vec::new()
         };
         self.expect_symbol(':');
-        let return_ty = self.collect_raw_until(&[
-            "{",
-            "validate",
-            "auth",
-            "csrf",
-            "rateLimit",
-            "revalidate",
-            "transaction",
-            "runtime",
-            "invalidates",
-            "maxBodySize",
-        ]);
+        let return_ty = self.collect_raw_until(SERVER_ACTION_MODIFIER_STOPS);
         let mut modifiers = Vec::new();
         while !self.at_eof() && !self.check_symbol('{') {
             let modifier_start = self.current().span.start;
@@ -254,22 +288,13 @@ impl Parser {
                 self.advance();
                 continue;
             };
-            let value = if self.check_symbol('{') {
+            let value = if self.check_symbol('{') && block_server_modifier(&name) {
                 self.skip_balanced_block();
                 None
+            } else if self.check_symbol('{') {
+                None
             } else {
-                let raw = self.collect_raw_until(&[
-                    "{",
-                    "validate",
-                    "auth",
-                    "csrf",
-                    "rateLimit",
-                    "revalidate",
-                    "transaction",
-                    "runtime",
-                    "invalidates",
-                    "maxBodySize",
-                ]);
+                let raw = self.collect_raw_until(SERVER_ACTION_MODIFIER_STOPS);
                 let raw = raw.trim().to_string();
                 (!raw.is_empty()).then_some(raw)
             };
@@ -598,6 +623,12 @@ impl Parser {
     }
 
     fn view_node(&mut self) -> Option<ViewNode> {
+        if self.eat_identish("raw") {
+            return Some(ViewNode::Match(self.raw_javascript_decl("raw")));
+        }
+        if self.eat_identish("script") {
+            return Some(ViewNode::Match(self.raw_javascript_decl("script")));
+        }
         if self.eat_keyword("if") {
             return self.if_node().map(ViewNode::If);
         }
@@ -971,6 +1002,49 @@ impl Parser {
         let name = self.ident_or_keyword();
         if self.check_symbol('{') {
             self.skip_balanced_block();
+        }
+        ReservedDecl {
+            kind: kind.into(),
+            name,
+            span: Span::new(start, self.previous().span.end),
+        }
+    }
+
+    fn raw_javascript_decl(&mut self, kind: &str) -> ReservedDecl {
+        let start = self.previous().span.start;
+        let name = if self.is_identish() {
+            self.ident_or_keyword()
+        } else {
+            None
+        };
+        self.diagnostics.push(Diagnostic::error(
+            "LUME6010",
+            "raw JavaScript embedding is not allowed",
+            Some(Span::new(start, self.previous().span.end)),
+        ));
+        if self.check_symbol('{') {
+            self.skip_balanced_block();
+        } else {
+            self.collect_raw_until(&[
+                "module",
+                "import",
+                "export",
+                "component",
+                "page",
+                "layout",
+                "route",
+                "style",
+                "theme",
+                "type",
+                "app",
+                "server",
+                "query",
+                "form",
+                "ffi",
+                "struct",
+                "enum",
+                "opaque",
+            ]);
         }
         ReservedDecl {
             kind: kind.into(),
@@ -1497,6 +1571,91 @@ component App {
     }
 
     #[test]
+    fn parses_server_action_result_stream_transaction_and_file_modifiers() {
+        let source = r#"
+server action upload(file: File): Result<URL, ActionError>
+  auth required
+  transaction
+  maxBodySize 5MB
+{
+  return { ok: true, value: file.name }
+}
+
+server action chunks(prompt: String): Stream<String>
+  transaction isolation="serializable"
+{
+  return ["a", prompt]
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let Decl::ServerAction(upload) = &program.declarations[0] else {
+            panic!("expected upload action");
+        };
+        assert_eq!(upload.return_ty, "Result<URL,ActionError>");
+        assert!(upload
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.name == "transaction" && modifier.value.is_none()));
+        assert!(upload
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.name == "maxBodySize"
+                && modifier
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.replace(' ', "") == "5MB")));
+        assert_eq!(upload.body.statements.len(), 1);
+
+        let Decl::ServerAction(chunks) = &program.declarations[1] else {
+            panic!("expected chunks action");
+        };
+        assert_eq!(chunks.return_ty, "Stream<String>");
+        assert!(chunks.modifiers.iter().any(|modifier| {
+            modifier.name == "transaction"
+                && modifier.value.as_deref() == Some("isolation=\"serializable\"")
+        }));
+    }
+
+    #[test]
+    fn parses_client_action_return_type_and_concurrency() {
+        let source = r#"
+component App {
+  state output: String = ""
+
+  async action search(query: String): String concurrency=restart {
+    return query
+  }
+
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let Decl::Component(component) = &program.declarations[0] else {
+            panic!("expected component");
+        };
+        let ComponentItem::Action(action) = &component.items[1] else {
+            panic!("expected action");
+        };
+        assert_eq!(action.return_ty.as_deref(), Some("String"));
+        assert_eq!(action.concurrency.as_deref(), Some("restart"));
+        assert!(action.is_async);
+    }
+
+    #[test]
     fn parses_ffi_decl_modifiers() {
         let source = r#"
 ffi module renderkit unsafe {
@@ -1587,5 +1746,40 @@ component App {
         assert_eq!(route.body.children.len(), 2);
         assert_eq!(route.body.children[0].path, "profile/:id");
         assert_eq!(route.body.children[1].path, "docs/*path");
+    }
+
+    #[test]
+    fn rejects_raw_javascript_syntax() {
+        let source = r#"
+raw js {
+  console.log("raw")
+}
+
+component App {
+  script {
+    console.log("component")
+  }
+
+  view {
+    script {
+      console.log("view")
+    }
+    Text("ok")
+  }
+}
+"#;
+        let (_program, diagnostics) = parse(source);
+        assert_eq!(
+            diagnostics
+                .as_slice()
+                .iter()
+                .filter(|diagnostic| diagnostic.code == "LUME6010")
+                .count(),
+            3
+        );
+        assert!(diagnostics
+            .as_slice()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "LUME6010"));
     }
 }

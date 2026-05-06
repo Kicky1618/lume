@@ -1,6 +1,6 @@
 use lume_ast::{ServerActionDecl, Stmt};
 use lume_backend_jit::JitBackend;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 pub const RUNTIME_NAME: &str = "lume-runtime-server";
 
@@ -34,6 +34,7 @@ pub enum ActionValue {
     Number(i64),
     String(String),
     Array(Vec<ActionValue>),
+    Object(BTreeMap<String, ActionValue>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,7 +47,7 @@ pub struct ActionError {
 pub struct ActionResult {
     pub value: ActionValue,
     pub runtime: ActionRuntime,
-    pub revalidate: Vec<String>,
+    pub revalidate: Vec<ActionValue>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,19 +97,52 @@ impl ServerRuntime {
             result.value.to_json(),
             result.runtime.as_str()
         );
+        if generic_inner(&action.return_ty, "Stream").is_some() {
+            response.push_str(",\"stream\":true");
+        }
+        if let Some(transaction) = action_transaction(action) {
+            response.push_str(&format!(
+                ",\"transaction\":\"{}\"",
+                escape_json(&transaction)
+            ));
+        }
         if !result.revalidate.is_empty() {
             response.push_str(&format!(
                 ",\"revalidate\":[{}]",
                 result
                     .revalidate
                     .iter()
-                    .map(|value| format!("\"{}\"", escape_json(value)))
+                    .map(ActionValue::to_json)
                     .collect::<Vec<_>>()
                     .join(",")
             ));
         }
         response.push('}');
         Ok(response)
+    }
+
+    pub fn call_sse_with_context(
+        &self,
+        id: &str,
+        body: &str,
+        context: &ActionRequestContext,
+    ) -> Result<String, ActionError> {
+        let action = self.action(id)?;
+        enforce_action_guards(action, context)?;
+        if let Some(max_body_size) = action_max_body_size(action)? {
+            if body.len() > max_body_size {
+                return Err(ActionError {
+                    status: 413,
+                    message: format!(
+                        "Server Action `{}` request body exceeds maxBodySize {}",
+                        action.name, max_body_size
+                    ),
+                });
+            }
+        }
+        let args = parse_call_args(body)?;
+        let result = self.call_with_context(id, args, context)?;
+        Ok(action_sse_response(&result))
     }
 
     pub fn call(&self, id: &str, args: Vec<ActionValue>) -> Result<ActionResult, ActionError> {
@@ -125,6 +159,7 @@ impl ServerRuntime {
         enforce_action_guards(action, context)?;
         self.validate_args(action, &args)?;
         validate_action_rules(action, &args)?;
+        let locals = action_locals(action, &args);
         if action_runtime(action).as_deref() == Some("jit") {
             if let Some(numeric_args) = all_i64_args(&args) {
                 if self.jit.is_available() {
@@ -138,7 +173,7 @@ impl ServerRuntime {
                     return Ok(ActionResult {
                         value: ActionValue::Number(output.value),
                         runtime: ActionRuntime::LlvmJit,
-                        revalidate: action_revalidations(action),
+                        revalidate: action_revalidations(action, &locals),
                     });
                 }
             }
@@ -148,7 +183,7 @@ impl ServerRuntime {
         Ok(ActionResult {
             value,
             runtime: ActionRuntime::Interpreter,
-            revalidate: action_revalidations(action),
+            revalidate: action_revalidations(action, &locals),
         })
     }
 
@@ -217,12 +252,20 @@ impl ActionValue {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Self::Object(fields) => format!(
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(key, value)| format!("\"{}\":{}", escape_json(key), value.to_json()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
         }
     }
 
     fn to_text(&self) -> String {
         match self {
-            Self::Null | Self::Array(_) => String::new(),
+            Self::Null | Self::Array(_) | Self::Object(_) => String::new(),
             Self::Bool(value) => value.to_string(),
             Self::Number(value) => value.to_string(),
             Self::String(value) => value.clone(),
@@ -243,7 +286,44 @@ impl ActionValue {
             Self::Number(_) => "Number",
             Self::String(_) => "String",
             Self::Array(_) => "Array",
+            Self::Object(_) => "Object",
         }
+    }
+}
+
+fn action_sse_response(result: &ActionResult) -> String {
+    let mut out = String::new();
+    for chunk in action_stream_chunks(&result.value) {
+        out.push_str("event: chunk\n");
+        out.push_str("data: ");
+        out.push_str(&chunk.to_json());
+        out.push_str("\n\n");
+    }
+    out.push_str("event: done\n");
+    out.push_str("data: {\"runtime\":\"");
+    out.push_str(result.runtime.as_str());
+    out.push('"');
+    if !result.revalidate.is_empty() {
+        out.push_str(",\"revalidate\":[");
+        out.push_str(
+            &result
+                .revalidate
+                .iter()
+                .map(ActionValue::to_json)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        out.push(']');
+    }
+    out.push_str("}\n\n");
+    out
+}
+
+fn action_stream_chunks(value: &ActionValue) -> Vec<ActionValue> {
+    match value {
+        ActionValue::Array(items) => items.clone(),
+        ActionValue::Null => Vec::new(),
+        other => vec![other.clone()],
     }
 }
 
@@ -309,11 +389,14 @@ fn validate_action_rules(
     Ok(())
 }
 
-fn action_revalidations(action: &ServerActionDecl) -> Vec<String> {
+fn action_revalidations(
+    action: &ServerActionDecl,
+    locals: &HashMap<String, ActionValue>,
+) -> Vec<ActionValue> {
     let mut values = Vec::new();
     for name in ["revalidate", "invalidates"] {
         if let Some(value) = modifier_value(action, name) {
-            values.push(value);
+            values.extend(action_revalidation_values(&value, locals));
         }
     }
     for stmt in &action.body.statements {
@@ -323,17 +406,40 @@ fn action_revalidations(action: &ServerActionDecl) -> Vec<String> {
                 .strip_prefix("revalidate(")
                 .and_then(|value| value.strip_suffix(')'))
             {
-                values.push(inner.trim().trim_matches(['"', '\'']).to_string());
+                values.extend(action_revalidation_values(inner, locals));
             }
         }
     }
     values
 }
 
+fn action_revalidation_values(
+    raw: &str,
+    locals: &HashMap<String, ActionValue>,
+) -> Vec<ActionValue> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let value = eval_expr(raw, locals)
+        .unwrap_or_else(|_| ActionValue::String(raw.trim_matches(['"', '\'']).to_string()));
+    match value {
+        ActionValue::Array(items)
+            if !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| matches!(item, ActionValue::Array(_))) =>
+        {
+            items
+        }
+        other => vec![other],
+    }
+}
+
 fn action_max_body_size(action: &ServerActionDecl) -> Result<Option<usize>, ActionError> {
     modifier_value(action, "maxBodySize")
         .map(|value| {
-            value.parse::<usize>().map_err(|_| ActionError {
+            parse_byte_size(&value).ok_or_else(|| ActionError {
                 status: 500,
                 message: format!(
                     "Server Action `{}` has invalid maxBodySize `{}`",
@@ -344,33 +450,83 @@ fn action_max_body_size(action: &ServerActionDecl) -> Result<Option<usize>, Acti
         .transpose()
 }
 
+fn action_transaction(action: &ServerActionDecl) -> Option<String> {
+    modifier_presence_value(action, "transaction", "true")
+}
+
 fn modifier_value(action: &ServerActionDecl, name: &str) -> Option<String> {
+    action_modifier(action, name)
+        .and_then(|modifier| modifier.value.as_deref())
+        .map(normalize_modifier_value)
+}
+
+fn modifier_presence_value(action: &ServerActionDecl, name: &str, default: &str) -> Option<String> {
+    action_modifier(action, name).map(|modifier| {
+        modifier
+            .value
+            .as_deref()
+            .map(normalize_modifier_value)
+            .unwrap_or_else(|| default.into())
+    })
+}
+
+fn action_modifier<'a>(
+    action: &'a ServerActionDecl,
+    name: &str,
+) -> Option<&'a lume_ast::ServerModifier> {
     action
         .modifiers
         .iter()
         .find(|modifier| modifier.name == name)
-        .and_then(|modifier| modifier.value.as_deref())
-        .map(normalize_modifier_value)
 }
 
 fn normalize_modifier_value(value: &str) -> String {
     value.trim().trim_matches(['"', '\'']).to_string()
 }
 
+fn parse_byte_size(value: &str) -> Option<usize> {
+    let compact = value
+        .trim()
+        .trim_matches(['"', '\''])
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '_')
+        .collect::<String>();
+    if compact.is_empty() {
+        return None;
+    }
+    let split = compact
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(compact.len());
+    let number = compact[..split].parse::<usize>().ok()?;
+    let unit = compact[split..].to_ascii_uppercase();
+    let multiplier = match unit.as_str() {
+        "" | "B" => 1,
+        "KB" | "KIB" => 1024,
+        "MB" | "MIB" => 1024 * 1024,
+        "GB" | "GIB" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    number.checked_mul(multiplier)
+}
+
 fn all_i64_args(args: &[ActionValue]) -> Option<Vec<i64>> {
     args.iter().map(ActionValue::as_i64).collect()
+}
+
+fn action_locals(action: &ServerActionDecl, args: &[ActionValue]) -> HashMap<String, ActionValue> {
+    action
+        .params
+        .iter()
+        .zip(args.iter())
+        .map(|(param, value)| (param.name.clone(), value.clone()))
+        .collect()
 }
 
 fn execute_interpreted(
     action: &ServerActionDecl,
     args: &[ActionValue],
 ) -> Result<ActionValue, ActionError> {
-    let mut locals = action
-        .params
-        .iter()
-        .zip(args.iter())
-        .map(|(param, value)| (param.name.clone(), value.clone()))
-        .collect::<HashMap<_, _>>();
+    let mut locals = action_locals(action, args);
     for stmt in &action.body.statements {
         match stmt {
             Stmt::Assign {
@@ -394,6 +550,9 @@ fn execute_interpreted(
                 let raw = expr.raw.trim();
                 if let Some(return_expr) = raw.strip_prefix("return").map(str::trim) {
                     return eval_expr(return_expr, &locals).map_err(action_eval_error);
+                }
+                if raw.starts_with("revalidate(") {
+                    continue;
                 }
                 eval_expr(raw, &locals).map_err(action_eval_error)?;
             }
@@ -433,6 +592,12 @@ fn eval_expr(raw: &str, locals: &HashMap<String, ActionValue>) -> Result<ActionV
         return Ok(ActionValue::Number(number));
     }
     if let Some(value) = eval_array(raw, locals)? {
+        return Ok(value);
+    }
+    if let Some(value) = eval_object(raw, locals)? {
+        return Ok(value);
+    }
+    if let Some(value) = eval_path(raw, locals)? {
         return Ok(value);
     }
     if let Some((left, _, right)) = split_binary_words(raw, &["||"]) {
@@ -544,6 +709,70 @@ fn eval_array(
         .map(Some)
 }
 
+fn eval_object(
+    raw: &str,
+    locals: &HashMap<String, ActionValue>,
+) -> Result<Option<ActionValue>, String> {
+    if !(raw.starts_with('{') && raw.ends_with('}')) {
+        return Ok(None);
+    }
+    let inner = &raw[1..raw.len() - 1];
+    let mut fields = BTreeMap::new();
+    if inner.trim().is_empty() {
+        return Ok(Some(ActionValue::Object(fields)));
+    }
+    for field in split_top_level_commas(inner) {
+        let Some((key, value)) = split_top_level_once(field, ':') else {
+            return Err(format!("invalid Server Action object field `{field}`"));
+        };
+        let key = key.trim().trim_matches(['"', '\'']);
+        if key.is_empty() {
+            return Err("Server Action object field has an empty key".into());
+        }
+        fields.insert(key.to_string(), eval_expr(value.trim(), locals)?);
+    }
+    Ok(Some(ActionValue::Object(fields)))
+}
+
+fn eval_path(
+    raw: &str,
+    locals: &HashMap<String, ActionValue>,
+) -> Result<Option<ActionValue>, String> {
+    if !raw.contains('.') {
+        return Ok(None);
+    }
+    let mut parts = raw.split('.');
+    let Some(first) = parts.next() else {
+        return Ok(None);
+    };
+    let Some(mut value) = locals.get(first.trim()).cloned() else {
+        return Ok(None);
+    };
+    for part in parts {
+        let key = part.trim();
+        if key.is_empty()
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        {
+            return Ok(None);
+        }
+        match value {
+            ActionValue::Object(fields) => {
+                value = fields.get(key).cloned().ok_or_else(|| {
+                    format!("Server Action object has no field `{key}` in `{raw}`")
+                })?;
+            }
+            _ => {
+                return Err(format!(
+                    "Server Action value `{key}` is not an object field"
+                ))
+            }
+        }
+    }
+    Ok(Some(value))
+}
+
 fn number(value: ActionValue) -> Result<i64, String> {
     match value {
         ActionValue::Number(value) => Ok(value),
@@ -558,6 +787,7 @@ fn truthy(value: &ActionValue) -> bool {
         ActionValue::Number(value) => *value != 0,
         ActionValue::String(value) => !value.is_empty(),
         ActionValue::Array(value) => !value.is_empty(),
+        ActionValue::Object(value) => !value.is_empty(),
     }
 }
 
@@ -578,17 +808,109 @@ fn validate_return(action: &ServerActionDecl, value: &ActionValue) -> Result<(),
 
 fn value_matches_type(value: &ActionValue, ty: &str) -> bool {
     let ty = ty.trim().trim_matches(['"', '\'']);
+    if ty.ends_with('?') {
+        return matches!(value, ActionValue::Null)
+            || value_matches_type(value, ty.trim_end_matches('?'));
+    }
+    if let Some(inner) = ty.strip_suffix("[]") {
+        return matches!(
+            value,
+            ActionValue::Array(items) if items.iter().all(|item| value_matches_type(item, inner))
+        );
+    }
+    if let Some(inner) = generic_inner(ty, "Array") {
+        return matches!(
+            value,
+            ActionValue::Array(items) if items.iter().all(|item| value_matches_type(item, inner))
+        );
+    }
+    if let Some(inner) = generic_inner(ty, "Optional") {
+        return matches!(value, ActionValue::Null) || value_matches_type(value, inner);
+    }
+    if let Some(inner) = generic_inner(ty, "Stream") {
+        return match value {
+            ActionValue::Array(items) => items.iter().all(|item| value_matches_type(item, inner)),
+            other => value_matches_type(other, inner),
+        };
+    }
+    if let Some(inner) = generic_inner(ty, "Result") {
+        let args = split_generic_args(inner);
+        return args.len() == 2 && value_matches_result(value, args[0], args[1]);
+    }
+    if let Some(inner) = generic_inner(ty, "Union") {
+        let args = split_generic_args(inner);
+        return args.iter().any(|arg| value_matches_type(value, arg));
+    }
     match ty {
         "Any" | "Unknown" => true,
         "Void" | "Null" => matches!(value, ActionValue::Null),
         "Bool" | "bool" => matches!(value, ActionValue::Bool(_)),
         "String" | "str" => matches!(value, ActionValue::String(_)),
+        "URL" => matches!(value, ActionValue::String(_)),
         "Array" => matches!(value, ActionValue::Array(_)),
-        "i64" | "i32" | "u64" | "u32" | "Int" | "Number" => {
+        "Object" => matches!(value, ActionValue::Object(_)),
+        "File" => is_file_value(value),
+        "FormData" => matches!(value, ActionValue::Object(_) | ActionValue::Null),
+        "i64" | "i32" | "u64" | "u32" | "Int" | "Number" | "Float" | "f64" | "f32" => {
             matches!(value, ActionValue::Number(_))
         }
         _ => true,
     }
+}
+
+fn value_matches_result(value: &ActionValue, ok_ty: &str, err_ty: &str) -> bool {
+    let ActionValue::Object(fields) = value else {
+        return false;
+    };
+    let Some(ActionValue::Bool(ok)) = fields.get("ok") else {
+        return false;
+    };
+    if *ok {
+        fields
+            .get("value")
+            .map(|value| value_matches_type(value, ok_ty))
+            .unwrap_or_else(|| matches!(ok_ty.trim(), "Void" | "Null"))
+    } else {
+        fields
+            .get("error")
+            .map(|value| value_matches_type(value, err_ty))
+            .unwrap_or(true)
+    }
+}
+
+fn is_file_value(value: &ActionValue) -> bool {
+    let ActionValue::Object(fields) = value else {
+        return false;
+    };
+    matches!(fields.get("__lumeFile"), Some(ActionValue::Bool(true)))
+        && matches!(fields.get("name"), Some(ActionValue::String(_)))
+        && matches!(fields.get("size"), Some(ActionValue::Number(_)))
+}
+
+fn generic_inner<'a>(ty: &'a str, name: &str) -> Option<&'a str> {
+    ty.strip_prefix(name)?
+        .strip_prefix('<')?
+        .strip_suffix('>')
+        .map(str::trim)
+}
+
+fn split_generic_args(raw: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let mut start = 0usize;
+    let mut depth = 0usize;
+    for (index, ch) in raw.char_indices() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                args.push(raw[start..index].trim());
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    args.push(raw[start..].trim());
+    args.into_iter().filter(|arg| !arg.is_empty()).collect()
 }
 
 fn parse_call_args(body: &str) -> Result<Vec<ActionValue>, ActionError> {
@@ -619,7 +941,7 @@ fn parse_call_args(body: &str) -> Result<Vec<ActionValue>, ActionError> {
 #[derive(Clone, Debug, PartialEq)]
 enum ParsedJson {
     Value(ActionValue),
-    Object(HashMap<String, ActionValue>),
+    Object(BTreeMap<String, ActionValue>),
 }
 
 struct JsonParser<'a> {
@@ -655,6 +977,7 @@ impl<'a> JsonParser<'a> {
     fn parse_value(&mut self) -> Result<ActionValue, String> {
         self.skip_ws();
         match self.peek() {
+            Some(b'{') => self.parse_object_fields().map(ActionValue::Object),
             Some(b'"') => self.parse_string().map(ActionValue::String),
             Some(b'[') => self.parse_array(),
             Some(b't') => {
@@ -675,11 +998,15 @@ impl<'a> JsonParser<'a> {
     }
 
     fn parse_object(&mut self) -> Result<ParsedJson, String> {
+        self.parse_object_fields().map(ParsedJson::Object)
+    }
+
+    fn parse_object_fields(&mut self) -> Result<BTreeMap<String, ActionValue>, String> {
         self.expect_byte(b'{')?;
-        let mut fields = HashMap::new();
+        let mut fields = BTreeMap::new();
         self.skip_ws();
         if self.eat_byte(b'}') {
-            return Ok(ParsedJson::Object(fields));
+            return Ok(fields);
         }
         loop {
             self.skip_ws();
@@ -694,7 +1021,7 @@ impl<'a> JsonParser<'a> {
             }
             self.expect_byte(b',')?;
         }
-        Ok(ParsedJson::Object(fields))
+        Ok(fields)
     }
 
     fn parse_array(&mut self) -> Result<ActionValue, String> {
@@ -810,8 +1137,8 @@ fn split_binary<'a>(raw: &'a str, ops: &[char]) -> Option<(&'a str, char, &'a st
         }
         match ch {
             '"' | '\'' => quote = Some(ch),
-            ')' | ']' => depth += 1,
-            '(' | '[' => depth = depth.saturating_sub(1),
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' => depth = depth.saturating_sub(1),
             op if depth == 0 && ops.contains(&op) && index > 0 => {
                 let left = raw[..index].trim();
                 let right = raw[index + op.len_utf8()..].trim();
@@ -844,8 +1171,8 @@ fn split_binary_words<'a>(
         }
         match ch {
             '"' | '\'' => quote = Some(ch),
-            ')' | ']' => depth += 1,
-            '(' | '[' => depth = depth.saturating_sub(1),
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' => depth = depth.saturating_sub(1),
             _ if depth == 0 => {
                 for op in ops {
                     if raw[index..].starts_with(op) {
@@ -877,8 +1204,8 @@ fn split_top_level_commas(raw: &str) -> Vec<&str> {
         }
         match ch {
             '"' | '\'' => quote = Some(ch),
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = depth.saturating_sub(1),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
                 items.push(raw[start..index].trim());
                 start = index + 1;
@@ -888,6 +1215,29 @@ fn split_top_level_commas(raw: &str) -> Vec<&str> {
     }
     items.push(raw[start..].trim());
     items
+}
+
+fn split_top_level_once(raw: &str, delimiter: char) -> Option<(&str, &str)> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    for (index, ch) in raw.char_indices() {
+        if let Some(active) = quote {
+            if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            _ if ch == delimiter && depth == 0 => {
+                return Some((&raw[..index], &raw[index + ch.len_utf8()..]));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn strip_parens(raw: &str) -> &str {
@@ -1068,6 +1418,169 @@ component App {
             .call_json("echo", r#"{"args":["this body is too long"]}"#)
             .expect_err("body limit");
         assert_eq!(err.status, 413);
+    }
+
+    #[test]
+    fn returns_structured_action_revalidations() {
+        let runtime = runtime_for(
+            r#"
+server action save(id: String): String invalidates ["note", id] {
+  revalidate("/notes")
+  return id
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let result = runtime
+            .call("save", vec![ActionValue::String("n1".into())])
+            .expect("action result");
+        assert_eq!(
+            result.revalidate,
+            vec![
+                ActionValue::Array(vec![
+                    ActionValue::String("note".into()),
+                    ActionValue::String("n1".into()),
+                ]),
+                ActionValue::String("/notes".into()),
+            ]
+        );
+        let body = runtime
+            .call_json("save", r#"{"args":["n1"]}"#)
+            .expect("json response");
+        assert!(body.contains(r#""revalidate":[["note","n1"],"/notes"]"#));
+    }
+
+    #[test]
+    fn accepts_object_action_arguments() {
+        let runtime = runtime_for(
+            r#"
+server action echo(input: Object): Object {
+  return input
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let body = runtime
+            .call_json("echo", r#"{"args":[{"title":"Hello","count":2}]}"#)
+            .expect("json response");
+        assert_eq!(
+            body,
+            r#"{"value":{"count":2,"title":"Hello"},"runtime":"interpreter"}"#
+        );
+    }
+
+    #[test]
+    fn returns_result_objects_and_reads_file_metadata() {
+        let runtime = runtime_for(
+            r#"
+server action upload(file: File): Result<URL, ActionError> maxBodySize 1MB {
+  return { ok: true, value: file.name }
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let body = runtime
+            .call_json(
+                "upload",
+                r#"{"args":[{"__lumeFile":true,"name":"avatar.png","type":"image/png","size":42}]}"#,
+            )
+            .expect("json response");
+        assert_eq!(
+            body,
+            r#"{"value":{"ok":true,"value":"avatar.png"},"runtime":"interpreter"}"#
+        );
+    }
+
+    #[test]
+    fn enforces_required_auth_and_allows_optional_auth() {
+        let runtime = runtime_for(
+            r#"
+server action privateEcho(message: String): String auth required {
+  return message
+}
+
+server action publicEcho(message: String): String auth optional {
+  return message
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let err = runtime
+            .call("privateEcho", vec![ActionValue::String("secret".into())])
+            .expect_err("auth error");
+        assert_eq!(err.status, 401);
+        let result = runtime
+            .call("publicEcho", vec![ActionValue::String("hello".into())])
+            .expect("optional auth result");
+        assert_eq!(result.value, ActionValue::String("hello".into()));
+    }
+
+    #[test]
+    fn exposes_transaction_metadata_in_json_response() {
+        let runtime = runtime_for(
+            r#"
+server action save(message: String): String transaction {
+  return message
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let body = runtime
+            .call_json("save", r#"{"args":["ok"]}"#)
+            .expect("json response");
+        assert!(body.contains(r#""transaction":"true""#));
+    }
+
+    #[test]
+    fn streams_action_arrays_as_sse_chunks() {
+        let runtime = runtime_for(
+            r#"
+server action chunks(prompt: String): Stream<String> {
+  return ["Hello", prompt]
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let sse = runtime
+            .call_sse_with_context("chunks", r#"{"args":["world"]}"#, &Default::default())
+            .expect("sse response");
+        assert!(sse.contains("event: chunk\ndata: \"Hello\""));
+        assert!(sse.contains("event: chunk\ndata: \"world\""));
+        assert!(sse.contains("event: done"));
+        let json = runtime
+            .call_json("chunks", r#"{"args":["world"]}"#)
+            .expect("json response");
+        assert!(json.contains(r#""stream":true"#));
     }
 
     fn runtime_for(source: &str) -> ServerRuntime {

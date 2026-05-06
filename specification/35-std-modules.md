@@ -24,15 +24,23 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 
 標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
 
-実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Form`、`Anchor`、`Canvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`query`、`storage`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
+実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`query`、`storage`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
 
 ### 35.1 `lume/std/ui`
 
 基本 UI コンポーネント。
 
 ```lume
-import { Text, Button, Input, TextArea, Image, Form, Anchor, Canvas, NativeCanvas, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
+import { Text, Button, Input, TextArea, Image, Script, Form, Anchor, Canvas, NativeCanvas, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
 ```
+
+`Script` は外部 script 参照のみを扱う。
+
+```lume
+Script(src="/assets/widget.js", defer)
+```
+
+inline JavaScript や `raw js` ブロックは許可しない。
 
 ### 35.2 `lume/std/layout`
 
@@ -72,13 +80,32 @@ import { Form, Field, FormData, validate } from "lume/std/form"
 
 ### 35.5 `lume/std/action`
 
-Server Action client stub と action result 型。
+Client Action の実行制御、Server Action client stub、action result 型。
 
 ```lume
-import { ActionResult, ActionError } from "lume/std/action"
+import {
+  ActionController,
+  ActionResult,
+  ActionError,
+  ActionStatus,
+  callAction,
+  useAction
+} from "lume/std/action"
 ```
 
-`ActionResult` / `ActionError` は現在の runtime の JSON 形状に対応するための概念で、専用モジュールとしては [未実装]。
+Client Action では `async action ... concurrency=enqueue|drop|restart` を扱う。既定は `enqueue` で、生成 JS runtime は action ごとの逐次 queue、実行中 drop、restart の latest-wins 管理を行う。
+
+Server Action は通常の関数呼び出しに加えて controller としても使える。
+
+```lume
+Button("保存") {
+  on click {
+    await savePost.mutate(input)
+  }
+}
+```
+
+生成 runtime は `ActionController`、`ActionResult`、`ActionError`、`ActionStatus`、`callAction`、`useAction` を client 側に用意し、server 側は同じ JSON wire format に `value`、`runtime`、`revalidate`、構造化 error を載せる。
 
 ### 35.6 `lume/std/query`
 

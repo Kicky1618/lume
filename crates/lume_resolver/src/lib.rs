@@ -188,6 +188,7 @@ fn standard_component_symbols() -> HashSet<String> {
         "Input",
         "TextArea",
         "Image",
+        "Script",
         "Form",
         "Anchor",
         "Modal",
@@ -231,6 +232,7 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "Input",
             "TextArea",
             "Image",
+            "Script",
             "Form",
             "Anchor",
             "Canvas",
@@ -262,7 +264,14 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "prefetchRoute",
         ]),
         "lume/std/form" => Some(&["Form", "Field", "FormData", "validate"]),
-        "lume/std/action" => Some(&["ActionResult", "ActionError"]),
+        "lume/std/action" => Some(&[
+            "ActionResult",
+            "ActionError",
+            "ActionController",
+            "ActionStatus",
+            "callAction",
+            "useAction",
+        ]),
         "lume/std/query" => Some(&["query", "invalidate"]),
         "lume/std/ffi" => Some(&[
             "Owned",
@@ -293,6 +302,7 @@ mod tests {
 import { Text, Button, TextArea, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
 import { Container } from "lume/std/layout"
 import { Router, Route } from "lume/std/router"
+import { ActionController, ActionResult, callAction, useAction } from "lume/std/action"
 
 component App {
   view {

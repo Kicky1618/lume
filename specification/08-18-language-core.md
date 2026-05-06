@@ -338,6 +338,8 @@ async action search(query: String) concurrency=restart {
 }
 ```
 
+実装では `concurrency=enqueue|drop|restart` を受け取り、client JS runtime が action ごとの queue / drop / latest-wins restart を管理する。`action compute(): Int` のような戻り値注釈も AST に保持する。
+
 `await` 境界をまたいだ `View<T>` / `Borrowed<T>` の保持は禁止する。
 
 ---

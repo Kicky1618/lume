@@ -11,7 +11,7 @@ view
 
 フロントエンドの状態更新だけでなく、サーバー側の処理や既存資産の呼び出しをどう一つのモデルで扱うかに注目すると読みやすい。
 
-現行実装では `query` の client cache と `server action` からの簡易 invalidation は実装済みで、`mutation`、`stream`、`validation DSL` は [未実装] とみなす。
+現行実装では `query` の client cache、`server action` の `revalidate` 伝搬、streaming action の SSE 互換 transport は実装済みで、`mutation` と `validation DSL` は [未実装] とみなす。
 
 ### 25.1 query
 
@@ -255,7 +255,7 @@ type ActionError = {
 
 ---
 
-### 26.7 result 型 [未実装]
+### 26.7 result 型
 
 Server Action は例外を投げる形式と `Result<T, E>` 形式の両方をサポートする。
 
@@ -288,6 +288,8 @@ server action updateProfile(input: ProfileInput): Result<User, ActionError> {
   }
 }
 ```
+
+実装では `Result<T, E>` の戻り値型を Server Action 境界で直列化可能型として扱い、runtime は `{ ok, value?, error? }` object の構造を検査する。例外系は従来どおり構造化 `ActionError` として transport に載る。
 
 ---
 
@@ -382,7 +384,7 @@ d
 
 ---
 
-### 26.11 transaction [未実装]
+### 26.11 transaction
 
 ```lume
 server action transfer(input: TransferInput): Void
@@ -404,6 +406,8 @@ server action createOrder(input: OrderInput): Order
   return order
 }
 ```
+
+実装では `transaction` と `transaction isolation="..."` を parser / manifest / action response metadata に保持し、dev runtime は no-op transaction boundary として扱う。外部 DB adapter との実トランザクション接続はまだ target / adapter 側の責務である。
 
 ---
 
@@ -444,7 +448,7 @@ FFI を使用する Server Action は原則 `native` を要求する。JIT か�
 
 ---
 
-### 26.13 streaming [未実装]
+### 26.13 streaming
 
 Server Action は stream を返せる。
 
@@ -465,6 +469,8 @@ on click async {
 ```
 
 HTTP 出力では SSE / fetch streaming / WebSocket のいずれかへ変換できる。
+
+実装では `Stream<T>` 戻り値を許可し、client stub は async iterable を返す。dev server は `Accept: text/event-stream` に対して SSE 互換の `chunk` / `done` event を返し、通常 JSON transport では配列 payload を stream chunk として扱う。
 
 ---
 
@@ -504,11 +510,11 @@ invalidates [
 ]
 ```
 
-この項目は manifest には出るが、クライアント runtime 側の一般化された cache invalidation は [未実装] で、現状は server action 呼び出し時の簡易 invalidation に留まる。
+実装では `invalidates` / `revalidate(...)` を Server Action の JSON response に `revalidate` として載せ、client runtime が文字列 key と配列 key の query cache invalidation に反映する。複数 key 指定も扱う。
 
 ---
 
-### 26.16 ファイルアップロード [未実装]
+### 26.16 ファイルアップロード
 
 ```lume
 server action uploadAvatar(file: File): URL
@@ -529,7 +535,7 @@ server action uploadImages(files: File[]): URL[]
 }
 ```
 
-実装では `maxBodySize` のサイズ制限はあるが、multipart / File binding の本格的なアップロード処理は [未実装]。
+実装では `maxBodySize` の `KB` / `MB` / `GB` 単位、`File` / `File[]` / `FormData` の client binding、File metadata + base64 payload の action transport、file action form の `multipart/form-data` 付与を扱う。multipart body を server 側で直接 streaming 保存する経路はまだ本格実装ではない。
 
 ---
 
@@ -568,6 +574,8 @@ export async function add(a: number, b: number): Promise<number> {
 ```ts
 registerServerAction("add", async (a, b) => a + b)
 ```
+
+実装では client runtime に `ActionController`、`ActionResult`、`ActionError`、`ActionStatus`、`callAction`、`useAction` を用意し、`Form action=...` からの送信も同じ action transport に乗る。
 
 ---
 

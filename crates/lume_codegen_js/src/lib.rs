@@ -117,26 +117,261 @@ pub fn generate_with_options(
             js.push_str(&format!("  {:?}: [{}],\n", action.name, params));
         }
         js.push_str("};\n\n");
-        js.push_str("async function callServerAction(id, args) {\n");
+        js.push_str("const serverActionParamTypes = {\n");
+        for action in &program.server_actions {
+            let params = action
+                .params
+                .iter()
+                .map(|param| format!("{{ name: {:?}, type: {:?} }}", param.name, param.ty.trim()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            js.push_str(&format!("  {:?}: [{}],\n", action.name, params));
+        }
+        js.push_str("};\n\n");
+        js.push_str("const serverActionReturnTypes = {\n");
+        for action in &program.server_actions {
+            js.push_str(&format!(
+                "  {:?}: {:?},\n",
+                action.name,
+                action.return_ty.trim()
+            ));
+        }
+        js.push_str("};\n\n");
+        js.push_str("class ActionError extends Error {\n");
+        js.push_str("  constructor(message, options = {}) {\n");
+        js.push_str("    super(message);\n");
+        js.push_str("    this.name = \"ActionError\";\n");
+        js.push_str("    this.status = options.status ?? 500;\n");
+        js.push_str("    this.action = options.action ?? null;\n");
+        js.push_str("    this.code = options.code ?? \"ACTION_FAILED\";\n");
+        js.push_str("    this.details = options.details ?? null;\n");
+        js.push_str("  }\n");
+        js.push_str("}\n\n");
+        js.push_str("const ActionResult = Object.freeze({\n");
+        js.push_str(
+            "  ok(value, meta = {}) { return { ok: true, value, error: null, ...meta }; },\n",
+        );
+        js.push_str(
+            "  error(error, meta = {}) { return { ok: false, value: null, error, ...meta }; }\n",
+        );
+        js.push_str("});\n\n");
+        js.push_str("const ActionStatus = Object.freeze({ idle: \"idle\", pending: \"pending\", success: \"success\", error: \"error\" });\n\n");
+        js.push_str("function actionErrorFromPayload(id, response, payload) {\n");
+        js.push_str("  const raw = payload?.error;\n");
+        js.push_str("  const message = typeof raw === \"string\" ? raw : raw?.message || `Server Action ${id} failed`;\n");
+        js.push_str("  return new ActionError(message, { status: response.status, action: id, code: raw?.code, details: raw });\n");
+        js.push_str("}\n\n");
+        js.push_str("function applyActionRevalidations(keys) {\n");
+        js.push_str("  for (const key of keys || []) lumeQueryCache.invalidate(key);\n");
+        js.push_str("}\n\n");
+        js.push_str("function actionReturnsStream(id) {\n");
+        js.push_str("  return /^Stream\\s*</.test(serverActionReturnTypes[id] || \"\");\n");
+        js.push_str("}\n\n");
+        js.push_str("function isFileLike(value) {\n");
+        js.push_str("  return typeof File !== \"undefined\" && value instanceof File;\n");
+        js.push_str("}\n\n");
+        js.push_str("function isFileArrayType(type) {\n");
+        js.push_str(
+            "  return type === \"File[]\" || /^Array<\\s*File\\s*>$/.test(type || \"\");\n",
+        );
+        js.push_str("}\n\n");
+        js.push_str("function formDataObject(data) {\n");
+        js.push_str("  const out = {};\n");
+        js.push_str("  for (const [key, value] of data.entries()) {\n");
+        js.push_str("    if (Object.prototype.hasOwnProperty.call(out, key)) out[key] = Array.isArray(out[key]) ? [...out[key], value] : [out[key], value];\n");
+        js.push_str("    else out[key] = value;\n");
+        js.push_str("  }\n");
+        js.push_str("  return out;\n");
+        js.push_str("}\n\n");
+        js.push_str("function coerceFormValue(value, type) {\n");
+        js.push_str("  if (value === null) return null;\n");
+        js.push_str("  if (isFileLike(value)) return value;\n");
+        js.push_str("  if (/^(i32|i64|u32|u64|Int|Number|Float|f32|f64)$/.test(type || \"\") && /^-?\\d+$/.test(value)) return Number(value);\n");
+        js.push_str("  if (value === \"true\") return true;\n");
+        js.push_str("  if (value === \"false\") return false;\n");
+        js.push_str("  return value;\n");
+        js.push_str("}\n\n");
+        js.push_str("async function encodeActionArg(value) {\n");
+        js.push_str("  if (isFileLike(value)) {\n");
+        js.push_str("    const bytes = new Uint8Array(await value.arrayBuffer());\n");
+        js.push_str("    let binary = \"\";\n");
+        js.push_str("    for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));\n");
+        js.push_str("    return { __lumeFile: true, name: value.name, type: value.type || \"application/octet-stream\", size: value.size, lastModified: value.lastModified || null, data: btoa(binary) };\n");
+        js.push_str("  }\n");
+        js.push_str(
+            "  if (Array.isArray(value)) return Promise.all(value.map(encodeActionArg));\n",
+        );
+        js.push_str("  if (value instanceof Date) return value.toISOString();\n");
+        js.push_str("  if (value && typeof value === \"object\") {\n");
+        js.push_str("    const entries = await Promise.all(Object.entries(value).map(async ([key, item]) => [key, await encodeActionArg(item)]));\n");
+        js.push_str("    return Object.fromEntries(entries);\n");
+        js.push_str("  }\n");
+        js.push_str("  return value;\n");
+        js.push_str("}\n\n");
+        js.push_str("function encodeActionArgs(args) {\n");
+        js.push_str("  return Promise.all((args || []).map(encodeActionArg));\n");
+        js.push_str("}\n\n");
+        js.push_str("async function callServerActionResult(id, args) {\n");
+        js.push_str("  const encodedArgs = await encodeActionArgs(args);\n");
         js.push_str(
             "  const response = await fetch(`/__lume/actions/${encodeURIComponent(id)}`, {\n",
         );
         js.push_str("    method: \"POST\",\n");
         js.push_str("    headers: { \"content-type\": \"application/json\", \"x-lume-csrf\": lumeCsrfToken },\n");
-        js.push_str("    body: JSON.stringify({ args })\n");
+        js.push_str("    body: JSON.stringify({ args: encodedArgs })\n");
         js.push_str("  });\n");
         js.push_str("  const payload = await response.json().catch(() => ({}));\n");
-        js.push_str(
-            "  if (!response.ok) throw new Error(payload.error || `Server Action ${id} failed`);\n",
-        );
-        js.push_str(
-            "  for (const key of payload.revalidate || []) lumeQueryCache.invalidate(key);\n",
-        );
-        js.push_str("  return payload.value;\n");
+        js.push_str("  const revalidate = payload.revalidate || [];\n");
+        js.push_str("  if (!response.ok) return ActionResult.error(actionErrorFromPayload(id, response, payload), { status: response.status, revalidate });\n");
+        js.push_str("  applyActionRevalidations(revalidate);\n");
+        js.push_str("  return ActionResult.ok(payload.value, { status: response.status, runtime: payload.runtime || null, revalidate });\n");
         js.push_str("}\n\n");
+        js.push_str("async function callServerAction(id, args) {\n");
+        js.push_str("  const result = await callServerActionResult(id, args);\n");
+        js.push_str("  if (!result.ok) throw result.error;\n");
+        js.push_str("  return result.value;\n");
+        js.push_str("}\n\n");
+        js.push_str("async function* streamServerAction(id, args) {\n");
+        js.push_str("  const encodedArgs = await encodeActionArgs(args);\n");
+        js.push_str(
+            "  const response = await fetch(`/__lume/actions/${encodeURIComponent(id)}`, {\n",
+        );
+        js.push_str("    method: \"POST\",\n");
+        js.push_str("    headers: { \"content-type\": \"application/json\", \"accept\": \"text/event-stream\", \"x-lume-csrf\": lumeCsrfToken },\n");
+        js.push_str("    body: JSON.stringify({ args: encodedArgs })\n");
+        js.push_str("  });\n");
+        js.push_str("  const contentType = response.headers.get(\"content-type\") || \"\";\n");
+        js.push_str("  if (!response.ok) {\n");
+        js.push_str("    const payload = await response.json().catch(() => ({}));\n");
+        js.push_str("    throw actionErrorFromPayload(id, response, payload);\n");
+        js.push_str("  }\n");
+        js.push_str("  if (!contentType.includes(\"text/event-stream\") || !response.body) {\n");
+        js.push_str("    const payload = await response.json().catch(() => ({}));\n");
+        js.push_str("    applyActionRevalidations(payload.revalidate || []);\n");
+        js.push_str(
+            "    const chunks = Array.isArray(payload.value) ? payload.value : [payload.value];\n",
+        );
+        js.push_str("    for (const chunk of chunks) if (chunk !== null && chunk !== undefined) yield chunk;\n");
+        js.push_str("    return;\n");
+        js.push_str("  }\n");
+        js.push_str("  const reader = response.body.getReader();\n");
+        js.push_str("  const decoder = new TextDecoder();\n");
+        js.push_str("  let buffer = \"\";\n");
+        js.push_str("  while (true) {\n");
+        js.push_str("    const { value, done } = await reader.read();\n");
+        js.push_str("    if (done) break;\n");
+        js.push_str("    buffer += decoder.decode(value, { stream: true });\n");
+        js.push_str("    let boundary;\n");
+        js.push_str("    while ((boundary = buffer.indexOf(\"\\n\\n\")) >= 0) {\n");
+        js.push_str("      const frame = buffer.slice(0, boundary);\n");
+        js.push_str("      buffer = buffer.slice(boundary + 2);\n");
+        js.push_str("      const event = frame.split(\"\\n\").find(line => line.startsWith(\"event:\"))?.slice(6).trim() || \"message\";\n");
+        js.push_str("      const data = frame.split(\"\\n\").filter(line => line.startsWith(\"data:\")).map(line => line.slice(5).trim()).join(\"\\n\");\n");
+        js.push_str("      if (event === \"chunk\") yield JSON.parse(data);\n");
+        js.push_str("      if (event === \"done\") applyActionRevalidations(JSON.parse(data || \"{}\").revalidate || []);\n");
+        js.push_str("    }\n");
+        js.push_str("  }\n");
+        js.push_str("}\n\n");
+        js.push_str("function actionArgsFromForm(id, form) {\n");
+        js.push_str("  const data = new FormData(form);\n");
+        js.push_str("  const schema = serverActionParamTypes[id] || [];\n");
+        js.push_str("  if (schema.length === 1 && schema[0].type === \"FormData\") {\n");
+        js.push_str("    return [formDataObject(data)];\n");
+        js.push_str("  }\n");
+        js.push_str("  return schema.map(field => {\n");
+        js.push_str("    if (isFileArrayType(field.type)) return data.getAll(field.name).filter(value => !isFileLike(value) || value.name);\n");
+        js.push_str("    const value = data.get(field.name);\n");
+        js.push_str("    return coerceFormValue(value, field.type);\n");
+        js.push_str("  });\n");
+        js.push_str("}\n\n");
+        js.push_str("class ActionController {\n");
+        js.push_str("  constructor(id, params = []) {\n");
+        js.push_str("    this.id = id;\n");
+        js.push_str("    this.params = params;\n");
+        js.push_str("    this.pending = false;\n");
+        js.push_str("    this.status = ActionStatus.idle;\n");
+        js.push_str("    this.value = undefined;\n");
+        js.push_str("    this.error = null;\n");
+        js.push_str("  }\n");
+        js.push_str("  async mutate(...args) {\n");
+        js.push_str("    const result = await this.result(...args);\n");
+        js.push_str("    if (!result.ok) throw result.error;\n");
+        js.push_str("    return result.value;\n");
+        js.push_str("  }\n");
+        js.push_str("  async result(...args) {\n");
+        js.push_str("    this.pending = true;\n");
+        js.push_str("    this.status = ActionStatus.pending;\n");
+        js.push_str("    this.error = null;\n");
+        js.push_str("    let result;\n");
+        js.push_str("    try {\n");
+        js.push_str("      result = await callServerActionResult(this.id, args);\n");
+        js.push_str("    } catch (error) {\n");
+        js.push_str("      const actionError = error instanceof ActionError ? error : new ActionError(error?.message || `Server Action ${this.id} failed`, { status: 0, action: this.id, details: error });\n");
+        js.push_str(
+            "      result = ActionResult.error(actionError, { status: 0, revalidate: [] });\n",
+        );
+        js.push_str("    }\n");
+        js.push_str("    this.pending = false;\n");
+        js.push_str("    if (result.ok) {\n");
+        js.push_str("      this.status = ActionStatus.success;\n");
+        js.push_str("      this.value = result.value;\n");
+        js.push_str("    } else {\n");
+        js.push_str("      this.status = ActionStatus.error;\n");
+        js.push_str("      this.error = result.error;\n");
+        js.push_str("    }\n");
+        js.push_str("    return result;\n");
+        js.push_str("  }\n");
+        js.push_str("  call(...args) { return this.mutate(...args); }\n");
+        js.push_str("  stream(...args) { return streamServerAction(this.id, args); }\n");
+        js.push_str("  formData(form) { return actionArgsFromForm(this.id, form); }\n");
+        js.push_str("}\n\n");
+        js.push_str("function bindActionFunction(fn, controller) {\n");
+        js.push_str("  fn.mutate = (...args) => controller.mutate(...args);\n");
+        js.push_str("  fn.result = (...args) => controller.result(...args);\n");
+        js.push_str("  fn.call = (...args) => controller.call(...args);\n");
+        js.push_str("  fn.stream = (...args) => controller.stream(...args);\n");
+        js.push_str("  fn.formData = form => controller.formData(form);\n");
+        js.push_str("  Object.defineProperties(fn, {\n");
+        js.push_str("    action: { get: () => controller },\n");
+        js.push_str("    pending: { get: () => controller.pending },\n");
+        js.push_str("    status: { get: () => controller.status },\n");
+        js.push_str("    value: { get: () => controller.value },\n");
+        js.push_str("    error: { get: () => controller.error }\n");
+        js.push_str("  });\n");
+        js.push_str("  return fn;\n");
+        js.push_str("}\n\n");
+        js.push_str("function useAction(action) {\n");
+        js.push_str("  if (action instanceof ActionController) return action;\n");
+        js.push_str(
+            "  if (typeof action === \"function\" && action.action) return action.action;\n",
+        );
+        js.push_str("  return new ActionController(String(action), serverActionParams[String(action)] || []);\n");
+        js.push_str("}\n\n");
+        js.push_str("function callAction(id, args = []) {\n");
+        js.push_str("  return actionReturnsStream(id) ? streamServerAction(id, args) : callServerAction(id, args);\n");
+        js.push_str("}\n\n");
+        js.push_str("const serverActions = {\n");
         for action in &program.server_actions {
             js.push_str(&format!(
-                "async function {}(...args) {{\n  return callServerAction({:?}, args);\n}}\n\n",
+                "  {:?}: new ActionController({:?}, serverActionParams[{:?}] || []),\n",
+                action.name, action.name, action.name
+            ));
+        }
+        js.push_str("};\n\n");
+        for action in &program.server_actions {
+            if is_stream_type(&action.return_ty) {
+                js.push_str(&format!(
+                    "function {}(...args) {{\n  return serverActions[{:?}].stream(...args);\n}}\n",
+                    action.name, action.name
+                ));
+            } else {
+                js.push_str(&format!(
+                    "async function {}(...args) {{\n  return serverActions[{:?}].mutate(...args);\n}}\n",
+                    action.name, action.name
+                ));
+            }
+            js.push_str(&format!(
+                "bindActionFunction({}, serverActions[{:?}]);\n\n",
                 action.name, action.name
             ));
         }
@@ -153,7 +388,18 @@ pub fn generate_with_options(
         js.push_str("    try { entry.data = await loader(); } catch (error) { entry.error = error; throw error; } finally { entry.loading = false; }\n");
         js.push_str("    return entry;\n");
         js.push_str("  },\n");
-        js.push_str("  invalidate(key) { this.values.delete(this.key(key)); }\n");
+        js.push_str("  invalidate(key) {\n");
+        js.push_str("    const id = this.key(key);\n");
+        js.push_str("    this.values.delete(id);\n");
+        js.push_str("    if (typeof key === \"string\") {\n");
+        js.push_str("      for (const existing of Array.from(this.values.keys())) {\n");
+        js.push_str("        if (existing === id || existing.includes(key)) this.values.delete(existing);\n");
+        js.push_str("      }\n");
+        js.push_str("    }\n");
+        js.push_str("  },\n");
+        js.push_str(
+            "  invalidateMany(keys) { for (const key of keys || []) this.invalidate(key); }\n",
+        );
         js.push_str("};\n\n");
         for query in program.queries.iter().filter(|query| !query.is_server) {
             let key = query
@@ -434,16 +680,9 @@ pub fn generate_with_options(
         js.push_str("  if (!form) return;\n");
         js.push_str("  event.preventDefault();\n");
         js.push_str("  const id = form.dataset.lumeFormAction;\n");
-        js.push_str("  const data = new FormData(form);\n");
-        js.push_str("  const args = (serverActionParams[id] || []).map(name => {\n");
-        js.push_str("    const value = data.get(name);\n");
-        js.push_str("    if (value === null) return null;\n");
-        js.push_str("    if (/^-?\\d+$/.test(value)) return Number(value);\n");
-        js.push_str("    if (value === \"true\") return true;\n");
-        js.push_str("    if (value === \"false\") return false;\n");
-        js.push_str("    return value;\n");
-        js.push_str("  });\n");
-        js.push_str("  void callServerAction(id, args).then(value => {\n");
+        js.push_str("  const action = serverActions[id] || new ActionController(id, serverActionParams[id] || []);\n");
+        js.push_str("  const args = action.formData(form);\n");
+        js.push_str("  void action.mutate(...args).then(value => {\n");
         js.push_str("    form.dispatchEvent(new CustomEvent(\"lume:success\", { bubbles: true, detail: { value } }));\n");
         js.push_str("    render_all();\n");
         js.push_str("  }).catch(error => {\n");
@@ -876,7 +1115,7 @@ fn gpu_canvas_attrs_template(
 
 fn component_actions_js(program: &LumeProgram, states: &HashSet<String>) -> String {
     let mut js = String::new();
-    for action in program
+    let actions = program
         .component
         .items
         .iter()
@@ -884,7 +1123,41 @@ fn component_actions_js(program: &LumeProgram, states: &HashSet<String>) -> Stri
             ComponentItem::Action(action) => Some(action),
             _ => None,
         })
-    {
+        .collect::<Vec<_>>();
+    if actions.iter().any(|action| action.is_async) {
+        js.push_str("const __lumeClientActionState = new Map();\n\n");
+        js.push_str("function __lumeClientActionEntry(id) {\n");
+        js.push_str("  if (!__lumeClientActionState.has(id)) __lumeClientActionState.set(id, { queue: Promise.resolve(), pending: false, token: 0, current: null });\n");
+        js.push_str("  return __lumeClientActionState.get(id);\n");
+        js.push_str("}\n\n");
+        js.push_str("function __lumeRunClientAction(id, mode, runner) {\n");
+        js.push_str("  const entry = __lumeClientActionEntry(id);\n");
+        js.push_str("  if (mode === \"drop\" && entry.pending) return entry.current || Promise.resolve(undefined);\n");
+        js.push_str("  const run = async () => {\n");
+        js.push_str("    entry.pending = true;\n");
+        js.push_str("    const token = ++entry.token;\n");
+        js.push_str("    try {\n");
+        js.push_str("      const value = await runner();\n");
+        js.push_str("      if (mode === \"restart\" && token !== entry.token) return undefined;\n");
+        js.push_str("      return value;\n");
+        js.push_str("    } finally {\n");
+        js.push_str(
+            "      if (mode !== \"restart\" || token === entry.token) entry.pending = false;\n",
+        );
+        js.push_str("      if (typeof render_all === \"function\") render_all();\n");
+        js.push_str("      if (typeof persistStateScope === \"function\") persistStateScope();\n");
+        js.push_str("    }\n");
+        js.push_str("  };\n");
+        js.push_str("  if (mode === \"restart\" || mode === \"drop\") {\n");
+        js.push_str("    entry.current = run();\n");
+        js.push_str("  } else {\n");
+        js.push_str("    entry.current = entry.queue.then(run, run);\n");
+        js.push_str("    entry.queue = entry.current.catch(() => {});\n");
+        js.push_str("  }\n");
+        js.push_str("  return entry.current;\n");
+        js.push_str("}\n\n");
+    }
+    for action in actions {
         let params = action
             .params
             .iter()
@@ -894,19 +1167,46 @@ fn component_actions_js(program: &LumeProgram, states: &HashSet<String>) -> Stri
             .iter()
             .map(|param| (*param).to_string())
             .collect::<HashSet<_>>();
-        let async_prefix = if action.is_async { "async " } else { "" };
-        js.push_str(&format!(
-            "{}function {}({}) {{\n",
-            async_prefix,
-            action.name,
-            params.join(", ")
-        ));
-        for stmt in &action.body.statements {
-            js.push_str("  ");
-            js.push_str(&stmt_js(stmt, &locals, states));
-            js.push('\n');
+        if action.is_async {
+            let impl_name = format!("__lume_client_action_{}_impl", action.name);
+            let mode = action.concurrency.as_deref().unwrap_or("enqueue");
+            js.push_str(&format!(
+                "async function {}({}) {{\n",
+                impl_name,
+                params.join(", ")
+            ));
+            for stmt in &action.body.statements {
+                js.push_str("  ");
+                js.push_str(&stmt_js(stmt, &locals, states));
+                js.push('\n');
+            }
+            js.push_str("}\n\n");
+            js.push_str(&format!(
+                "function {}({}) {{\n",
+                action.name,
+                params.join(", ")
+            ));
+            js.push_str(&format!(
+                "  return __lumeRunClientAction({:?}, {:?}, () => {}({}));\n",
+                action.name,
+                mode,
+                impl_name,
+                params.join(", ")
+            ));
+            js.push_str("}\n\n");
+        } else {
+            js.push_str(&format!(
+                "function {}({}) {{\n",
+                action.name,
+                params.join(", ")
+            ));
+            for stmt in &action.body.statements {
+                js.push_str("  ");
+                js.push_str(&stmt_js(stmt, &locals, states));
+                js.push('\n');
+            }
+            js.push_str("}\n\n");
         }
-        js.push_str("}\n\n");
     }
     js
 }
@@ -1122,6 +1422,15 @@ fn render_form_template(
         })
         .map(|name| format!(" data-lume-form-action=\"{}\"", escape_template(name)))
         .unwrap_or_default();
+    let enctype_attr = attr_value(element, "enctype")
+        .map(|e| format!(" enctype=\"{}\"", escape_template(e.raw.trim_matches('"'))))
+        .or_else(|| {
+            action
+                .as_ref()
+                .filter(|name| action_accepts_file_upload(program, name))
+                .map(|_| " enctype=\"multipart/form-data\"".to_string())
+        })
+        .unwrap_or_default();
     let children = element
         .children
         .as_ref()
@@ -1131,13 +1440,30 @@ fn render_form_template(
         })
         .unwrap_or_default();
     format!(
-        "<form data-lume-id=\"{}\" method=\"{}\"{}{}>{}</form>",
+        "<form data-lume-id=\"{}\" method=\"{}\"{}{}{}>{}</form>",
         id,
         escape_template(&method),
         action_attr,
         form_action_attr,
+        enctype_attr,
         children
     )
+}
+
+fn action_accepts_file_upload(program: &LumeProgram, name: &str) -> bool {
+    program
+        .server_actions
+        .iter()
+        .find(|action| action.name == name)
+        .is_some_and(|action| {
+            action.params.iter().any(|param| {
+                let ty = param.ty.trim();
+                ty == "File"
+                    || ty == "FormData"
+                    || ty.ends_with("File[]")
+                    || ty.contains("Array<File>")
+            })
+        })
 }
 
 fn render_container_template(
@@ -1454,6 +1780,10 @@ fn is_string_literal(raw: &str) -> bool {
     (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
 }
 
+fn is_stream_type(ty: &str) -> bool {
+    ty.trim().trim_matches(['"', '\'']).starts_with("Stream<")
+}
+
 fn js_raw_array_or_string(raw: &str) -> String {
     let raw = raw.trim();
     if raw.starts_with('[') || is_string_literal(raw) {
@@ -1753,10 +2083,79 @@ component App {
         let html = generate_html(&ir);
         let js = generate(&ir, &html);
         assert!(js.contains("async function callServerAction(id, args)"));
+        assert!(js.contains("class ActionController"));
+        assert!(js.contains("async function callServerActionResult(id, args)"));
         assert!(js.contains("async function add(...args)"));
-        assert!(js.contains("return callServerAction(\"add\", args);"));
+        assert!(js.contains("return serverActions[\"add\"].mutate(...args);"));
+        assert!(js.contains("bindActionFunction(add, serverActions[\"add\"]);"));
         assert!(js.contains("void actions[0](event, target);"));
         assert!(js.contains("add(state.count);"));
+    }
+
+    #[test]
+    fn generates_stream_and_file_action_helpers() {
+        let source = r#"
+server action uploadAvatar(file: File): Result<URL, ActionError> maxBodySize 5MB {
+  return { ok: true, value: file.name }
+}
+
+server action chunks(prompt: String): Stream<String> {
+  return ["hello", prompt]
+}
+
+component App {
+  view {
+    Form action=uploadAvatar method="post" {
+      Input(name="file", label="Avatar", type="file")
+      Button("Upload", type="submit")
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("const serverActionReturnTypes"));
+        assert!(js.contains("async function encodeActionArg(value)"));
+        assert!(js.contains("__lumeFile: true"));
+        assert!(js.contains("async function* streamServerAction(id, args)"));
+        assert!(js.contains("function chunks(...args)"));
+        assert!(js.contains("return serverActions[\"chunks\"].stream(...args);"));
+        assert!(js.contains("return [formDataObject(data)];"));
+    }
+
+    #[test]
+    fn generates_async_client_action_concurrency_runtime() {
+        let source = r#"
+component App {
+  state message: String = ""
+
+  async action save(next: String): String concurrency=restart {
+    message = await saveMessage(next)
+    return message
+  }
+
+  view {
+    Button("Save") {
+      on click {
+        save("ok")
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("const __lumeClientActionState = new Map();"));
+        assert!(js.contains("function __lumeRunClientAction(id, mode, runner)"));
+        assert!(js.contains("async function __lume_client_action_save_impl(next)"));
+        assert!(js.contains("return __lumeRunClientAction(\"save\", \"restart\""));
+        assert!(js.contains("save(\"ok\");"));
     }
 
     #[test]

@@ -454,16 +454,25 @@ fn handle_action_request(
             format!("action body is not utf-8: {err}"),
         )
     })?;
-    match runtime.call_json_with_context(action_id, body, &context) {
-        Ok(response) => write_response(
-            stream,
-            "200 OK",
-            "application/json; charset=utf-8",
-            true,
-            response.as_bytes(),
-        ),
+    let wants_stream = request_header(headers, "accept")
+        .is_some_and(|accept| accept.contains("text/event-stream"));
+    let response = if wants_stream {
+        runtime
+            .call_sse_with_context(action_id, body, &context)
+            .map(|body| ("text/event-stream; charset=utf-8", body))
+    } else {
+        runtime
+            .call_json_with_context(action_id, body, &context)
+            .map(|body| ("application/json; charset=utf-8", body))
+    };
+    match response {
+        Ok(response) => write_response(stream, "200 OK", response.0, true, response.1.as_bytes()),
         Err(err) => {
-            let body = format!("{{\"error\":\"{}\"}}", json_escape(&err.message));
+            let body = format!(
+                "{{\"error\":{{\"code\":\"ACTION_FAILED\",\"message\":\"{}\",\"status\":{}}}}}",
+                json_escape(&err.message),
+                err.status
+            );
             write_response(
                 stream,
                 status_line(err.status),
@@ -941,7 +950,7 @@ fn mime_type(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{mime_type, resolve_request_path, spa_fallback_path};
+    use super::{mime_type, parse_byte_size, resolve_request_path, spa_fallback_path};
     use std::path::Path;
 
     #[test]
@@ -980,6 +989,14 @@ mod tests {
             mime_type(Path::new("dist/assets/app.wasm")),
             "application/wasm"
         );
+    }
+
+    #[test]
+    fn parses_action_body_size_units() {
+        assert_eq!(parse_byte_size("256"), Some(256));
+        assert_eq!(parse_byte_size("5 MB"), Some(5 * 1024 * 1024));
+        assert_eq!(parse_byte_size("1GiB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_byte_size("lots"), None);
     }
 }
 
@@ -1155,6 +1172,13 @@ fn manifest(
                     .find(|modifier| modifier.name == name)
                     .and_then(|modifier| modifier.value.as_deref())
             };
+            let modifier_presence_value = |name: &str, default: &str| {
+                action
+                    .modifiers
+                    .iter()
+                    .find(|modifier| modifier.name == name)
+                    .map(|modifier| modifier.value.clone().unwrap_or_else(|| default.into()))
+            };
             let runtime = modifier_value("runtime")
                 .map(unquote_lume_value)
                 .unwrap_or_else(|| "server".into());
@@ -1171,8 +1195,8 @@ fn manifest(
             let rate_limit = modifier_value("rateLimit")
                 .map(unquote_lume_value)
                 .unwrap_or_default();
-            let transaction = modifier_value("transaction")
-                .map(unquote_lume_value)
+            let transaction = modifier_presence_value("transaction", "true")
+                .map(|value| unquote_lume_value(&value))
                 .unwrap_or_default();
             let input = action
                 .params
@@ -1725,7 +1749,9 @@ fn optional_json_number(value: &str) -> String {
     if value.is_empty() {
         "null".into()
     } else {
-        value.to_string()
+        parse_byte_size(value)
+            .map(|size| size.to_string())
+            .unwrap_or_else(|| value.to_string())
     }
 }
 
@@ -1736,4 +1762,29 @@ fn json_escape(value: &str) -> String {
         .replace('\n', "\\n")
         .replace('\r', "\\r")
         .replace('\t', "\\t")
+}
+
+fn parse_byte_size(value: &str) -> Option<usize> {
+    let compact = value
+        .trim()
+        .trim_matches(['"', '\''])
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '_')
+        .collect::<String>();
+    if compact.is_empty() {
+        return None;
+    }
+    let split = compact
+        .find(|ch: char| !ch.is_ascii_digit())
+        .unwrap_or(compact.len());
+    let number = compact[..split].parse::<usize>().ok()?;
+    let unit = compact[split..].to_ascii_uppercase();
+    let multiplier = match unit.as_str() {
+        "" | "B" => 1,
+        "KB" | "KIB" => 1024,
+        "MB" | "MIB" => 1024 * 1024,
+        "GB" | "GIB" => 1024 * 1024 * 1024,
+        _ => return None,
+    };
+    number.checked_mul(multiplier)
 }
