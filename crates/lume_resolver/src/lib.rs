@@ -186,14 +186,23 @@ fn standard_component_symbols() -> HashSet<String> {
         "Text",
         "Button",
         "Input",
+        "TextArea",
         "Image",
         "Form",
         "Anchor",
+        "Modal",
+        "Dialog",
+        "Tabs",
+        "Table",
+        "Spacer",
         "Box",
+        "Container",
         "Row",
         "Column",
         "Grid",
         "Stack",
+        "Router",
+        "Route",
         "Link",
         "NavLink",
         "Outlet",
@@ -220,14 +229,30 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "Text",
             "Button",
             "Input",
+            "TextArea",
             "Image",
             "Form",
             "Anchor",
             "Canvas",
             "NativeCanvas",
+            "Modal",
+            "Dialog",
+            "Tabs",
+            "Table",
+            "Spacer",
         ]),
-        "lume/std/layout" => Some(&["Box", "Row", "Column", "Grid", "Stack"]),
+        "lume/std/layout" => Some(&[
+            "Box",
+            "Row",
+            "Column",
+            "Grid",
+            "Stack",
+            "Container",
+            "Spacer",
+        ]),
         "lume/std/router" => Some(&[
+            "Router",
+            "Route",
             "Link",
             "NavLink",
             "Outlet",
@@ -265,11 +290,31 @@ mod tests {
     #[test]
     fn accepts_known_standard_imports() {
         let source = r#"
-import { Text, Button } from "lume/std/ui"
+import { Text, Button, TextArea, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
+import { Container } from "lume/std/layout"
+import { Router, Route } from "lume/std/router"
 
 component App {
   view {
-    Text("ok")
+    Container {
+      Router {
+        Route {
+          Text("ok")
+          TextArea(label="ok")
+          Modal(title="ok") {
+            Dialog(title="ok") {
+              Tabs {
+                Button("tab")
+              }
+              Table {
+                Text("cell")
+              }
+              Spacer height=8
+            }
+          }
+        }
+      }
+    }
   }
 }
 "#;

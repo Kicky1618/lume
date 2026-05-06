@@ -169,10 +169,13 @@ fn check_element(
             Some(element.span),
         ));
     }
-    if element.name == "Input" && !has_attr(element, "label") && !has_attr(element, "aria-label") {
+    if matches!(element.name.as_str(), "Input" | "TextArea")
+        && !has_attr(element, "label")
+        && !has_attr(element, "aria-label")
+    {
         diagnostics.push(Diagnostic::error(
             "LUME6202",
-            "Input requires label or aria-label",
+            format!("{} requires label or aria-label", element.name),
             Some(element.span),
         ));
     }
@@ -625,14 +628,23 @@ fn standard_component_symbols() -> HashSet<String> {
         "Text",
         "Button",
         "Input",
+        "TextArea",
         "Image",
         "Form",
         "Anchor",
+        "Modal",
+        "Dialog",
+        "Tabs",
+        "Table",
+        "Spacer",
         "Box",
+        "Container",
         "Row",
         "Column",
         "Grid",
         "Stack",
+        "Router",
+        "Route",
         "Link",
         "NavLink",
         "Outlet",

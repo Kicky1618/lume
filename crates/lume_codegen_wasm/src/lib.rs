@@ -7,12 +7,21 @@ use inkwell::targets::{
 use inkwell::types::IntType;
 use inkwell::values::{FunctionValue, GlobalValue, IntValue};
 use inkwell::OptimizationLevel;
+use lume_ast::{AssignOp, Stmt};
 use lume_ir::LumeProgram;
+use std::collections::HashMap;
 
 const WASM_TARGET: &str = "wasm32-unknown-unknown";
+const PATCH_PTR: u32 = 256;
 
 #[derive(Clone, Debug, Default)]
 pub struct WasmBackend;
+
+#[derive(Clone, Debug, Default)]
+pub struct WasmEvent {
+    pub id: usize,
+    pub statements: Vec<Stmt>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WasmArtifact {
@@ -29,29 +38,33 @@ impl WasmBackend {
     }
 
     pub fn emit(&self, program: &LumeProgram) -> Result<WasmArtifact, String> {
-        emit_llvm_wasm(program)
+        self.emit_with_events(program, &[])
     }
 
-    pub fn emit_skeleton(&self) -> &'static [u8] {
+    pub fn emit_with_events(
+        &self,
+        program: &LumeProgram,
+        events: &[WasmEvent],
+    ) -> Result<WasmArtifact, String> {
+        emit_llvm_wasm_with_events(program, events)
+    }
+
+    pub fn emit_skeleton(&self) -> Vec<u8> {
         // A tiny valid module that exports the runtime ABI names expected by
         // the JS loader. This remains as a build-time fallback when the local
         // LLVM install has no WebAssembly target support.
-        &[
-            0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, // header
-            0x01, 0x0d, 0x02, 0x60, 0x02, 0x7f, 0x7f, 0x00, 0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01,
-            0x7f, // types
-            0x03, 0x04, 0x03, 0x00, 0x01, 0x00, // funcs
-            0x07, 0x32, 0x03, // exports
-            0x09, b'l', b'u', b'm', b'e', b'_', b'i', b'n', b'i', b't', 0x00, 0x00, 0x0d, b'l',
-            b'u', b'm', b'e', b'_', b'd', b'i', b's', b'p', b'a', b't', b'c', b'h', 0x00, 0x01,
-            0x12, b'l', b'u', b'm', b'e', b'_', b'g', b'e', b't', b'_', b'p', b'a', b't', b'c',
-            b'h', b'_', b'l', b'e', b'n', 0x00, 0x02, 0x0a, 0x0e, 0x03, // code
-            0x02, 0x00, 0x0b, 0x04, 0x00, 0x41, 0x00, 0x0b, 0x04, 0x00, 0x41, 0x00, 0x0b,
-        ]
+        encode_runtime_wasm_from_parts(&[], &[])
     }
 }
 
 pub fn emit_llvm_wasm(program: &LumeProgram) -> Result<WasmArtifact, String> {
+    emit_llvm_wasm_with_events(program, &[])
+}
+
+pub fn emit_llvm_wasm_with_events(
+    program: &LumeProgram,
+    events: &[WasmEvent],
+) -> Result<WasmArtifact, String> {
     Target::initialize_webassembly(&InitializationConfig::default());
     let context = Context::create();
     let module = context.create_module("lume_app_wasm");
@@ -69,7 +82,7 @@ pub fn emit_llvm_wasm(program: &LumeProgram) -> Result<WasmArtifact, String> {
         .map_err(|err| format!("failed to emit wasm32 object from LLVM: {err}"))?
         .as_slice()
         .to_vec();
-    let wasm = encode_runtime_wasm(program);
+    let wasm = encode_runtime_wasm(program, events);
 
     Ok(WasmArtifact {
         wasm,
@@ -82,24 +95,53 @@ pub fn emit_llvm_wasm(program: &LumeProgram) -> Result<WasmArtifact, String> {
             "lume_get_patch_len".into(),
             "lume_alloc".into(),
             "lume_free".into(),
+            "lume_set_state".into(),
+            "lume_get_state".into(),
         ],
     })
 }
 
-fn encode_runtime_wasm(program: &LumeProgram) -> Vec<u8> {
+fn encode_runtime_wasm(program: &LumeProgram, events: &[WasmEvent]) -> Vec<u8> {
+    let states = program
+        .states()
+        .enumerate()
+        .map(|(index, state)| {
+            (
+                state.name.clone(),
+                index,
+                initial_i32(&state.init.raw) as i32,
+            )
+        })
+        .collect::<Vec<_>>();
+    let state_map = states
+        .iter()
+        .map(|(name, index, _)| (name.as_str(), *index))
+        .collect::<HashMap<_, _>>();
+    let compiled_events = events
+        .iter()
+        .filter_map(|event| compile_event(event, &state_map))
+        .collect::<Vec<_>>();
+
+    encode_runtime_wasm_from_parts(&states, &compiled_events)
+}
+
+fn encode_runtime_wasm_from_parts(
+    states: &[(String, usize, i32)],
+    compiled_events: &[CompiledEvent],
+) -> Vec<u8> {
     let mut wasm = Vec::new();
     wasm.extend_from_slice(b"\0asm\x01\0\0\0");
     section(&mut wasm, 1, |out| {
-        leb(out, 5);
+        leb(out, 4);
         func_type(out, &[0x7f, 0x7f], &[]);
         func_type(out, &[0x7f, 0x7f, 0x7f], &[0x7f]);
-        func_type(out, &[0x7f], &[0x7f]);
         func_type(out, &[0x7f], &[0x7f]);
         func_type(out, &[0x7f], &[]);
     });
     section(&mut wasm, 3, |out| {
-        leb(out, 5);
-        for index in 0..5 {
+        let types = [0, 1, 2, 2, 3, 0, 2];
+        leb(out, types.len() as u32);
+        for index in types {
             leb(out, index);
         }
     });
@@ -109,24 +151,26 @@ fn encode_runtime_wasm(program: &LumeProgram) -> Vec<u8> {
         leb(out, 1);
     });
     section(&mut wasm, 6, |out| {
-        leb(out, 2 + program.states().count() as u32);
+        leb(out, 2 + states.len() as u32);
         mutable_i32_global(out, 1024);
         mutable_i32_global(out, 0);
-        for state in program.states() {
-            mutable_i32_global(out, initial_i32(&state.init.raw) as i32);
+        for (_, _, initial) in states {
+            mutable_i32_global(out, *initial);
         }
     });
     section(&mut wasm, 7, |out| {
-        leb(out, 6);
+        leb(out, 8);
         export(out, "memory", 0x02, 0);
         export(out, "lume_init", 0x00, 0);
         export(out, "lume_dispatch", 0x00, 1);
         export(out, "lume_get_patch_len", 0x00, 2);
         export(out, "lume_alloc", 0x00, 3);
         export(out, "lume_free", 0x00, 4);
+        export(out, "lume_set_state", 0x00, 5);
+        export(out, "lume_get_state", 0x00, 6);
     });
     section(&mut wasm, 10, |out| {
-        leb(out, 5);
+        leb(out, 7);
         func_body(out, &[], |body| {
             body.push(0x41);
             leb(body, 0);
@@ -138,6 +182,22 @@ fn encode_runtime_wasm(program: &LumeProgram) -> Vec<u8> {
             leb(body, 0);
             body.push(0x24);
             leb(body, 1);
+            for event in compiled_events {
+                body.push(0x20);
+                leb(body, 0);
+                body.push(0x41);
+                leb(body, event.id as u32);
+                body.push(0x46);
+                body.push(0x04);
+                body.push(0x40);
+                for op in &event.ops {
+                    emit_runtime_op(body, op);
+                }
+                body.push(0x41);
+                leb(body, PATCH_PTR);
+                body.push(0x0f);
+                body.push(0x0b);
+            }
             body.push(0x41);
             leb(body, 0);
         });
@@ -167,8 +227,156 @@ fn encode_runtime_wasm(program: &LumeProgram) -> Vec<u8> {
             leb(body, 1);
         });
         func_body(out, &[], |_| {});
+        func_body(out, &[], |body| {
+            for (_, index, _) in states {
+                body.push(0x20);
+                leb(body, 0);
+                body.push(0x41);
+                leb(body, *index as u32);
+                body.push(0x46);
+                body.push(0x04);
+                body.push(0x40);
+                body.push(0x20);
+                leb(body, 1);
+                body.push(0x24);
+                leb(body, state_global(*index));
+                body.push(0x0f);
+                body.push(0x0b);
+            }
+        });
+        func_body(out, &[], |body| {
+            for (_, index, _) in states {
+                body.push(0x20);
+                leb(body, 0);
+                body.push(0x41);
+                leb(body, *index as u32);
+                body.push(0x46);
+                body.push(0x04);
+                body.push(0x40);
+                body.push(0x23);
+                leb(body, state_global(*index));
+                body.push(0x0f);
+                body.push(0x0b);
+            }
+            body.push(0x41);
+            leb(body, 0);
+        });
     });
     wasm
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompiledEvent {
+    id: usize,
+    ops: Vec<RuntimeOp>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeOp {
+    state_index: usize,
+    op: AssignOp,
+    value: RuntimeValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RuntimeValue {
+    Const(i32),
+    State(usize),
+}
+
+fn compile_event(event: &WasmEvent, state_map: &HashMap<&str, usize>) -> Option<CompiledEvent> {
+    let mut ops = Vec::new();
+    for stmt in &event.statements {
+        let Stmt::Assign {
+            target, op, expr, ..
+        } = stmt
+        else {
+            return None;
+        };
+        let state_index = *state_map.get(target.as_str())?;
+        let value = compile_value(expr.raw.trim(), state_map)?;
+        ops.push(RuntimeOp {
+            state_index,
+            op: op.clone(),
+            value,
+        });
+    }
+    Some(CompiledEvent { id: event.id, ops })
+}
+
+fn compile_value(raw: &str, state_map: &HashMap<&str, usize>) -> Option<RuntimeValue> {
+    raw.parse::<i32>()
+        .map(RuntimeValue::Const)
+        .ok()
+        .or_else(|| state_map.get(raw).copied().map(RuntimeValue::State))
+}
+
+fn emit_runtime_op(out: &mut Vec<u8>, op: &RuntimeOp) {
+    if !matches!(op.op, AssignOp::Set) {
+        out.push(0x23);
+        leb(out, state_global(op.state_index));
+    }
+    emit_runtime_value(out, &op.value);
+    match op.op {
+        AssignOp::Set => {}
+        AssignOp::Add => out.push(0x6a),
+        AssignOp::Sub => out.push(0x6b),
+    }
+    out.push(0x24);
+    leb(out, state_global(op.state_index));
+    emit_patch_write(out, op.state_index);
+}
+
+fn emit_runtime_value(out: &mut Vec<u8>, value: &RuntimeValue) {
+    match value {
+        RuntimeValue::Const(value) => {
+            out.push(0x41);
+            sleb(out, *value);
+        }
+        RuntimeValue::State(index) => {
+            out.push(0x23);
+            leb(out, state_global(*index));
+        }
+    }
+}
+
+fn emit_patch_write(out: &mut Vec<u8>, state_index: usize) {
+    emit_patch_address(out);
+    out.push(0x41);
+    leb(out, state_index as u32);
+    out.push(0x36);
+    leb(out, 2);
+    leb(out, 0);
+
+    emit_patch_address(out);
+    out.push(0x41);
+    leb(out, 4);
+    out.push(0x6a);
+    out.push(0x23);
+    leb(out, state_global(state_index));
+    out.push(0x36);
+    leb(out, 2);
+    leb(out, 0);
+
+    out.push(0x23);
+    leb(out, 1);
+    out.push(0x41);
+    leb(out, 8);
+    out.push(0x6a);
+    out.push(0x24);
+    leb(out, 1);
+}
+
+fn emit_patch_address(out: &mut Vec<u8>) {
+    out.push(0x41);
+    leb(out, PATCH_PTR);
+    out.push(0x23);
+    leb(out, 1);
+    out.push(0x6a);
+}
+
+fn state_global(index: usize) -> u32 {
+    2 + index as u32
 }
 
 fn section(wasm: &mut Vec<u8>, id: u8, write: impl FnOnce(&mut Vec<u8>)) {
@@ -486,7 +694,13 @@ mod tests {
         assert!(bytes
             .windows(b"lume_get_patch_len".len())
             .any(|item| item == b"lume_get_patch_len"));
-        assert_sections_are_well_sized(bytes);
+        assert!(bytes
+            .windows(b"lume_set_state".len())
+            .any(|item| item == b"lume_set_state"));
+        assert!(bytes
+            .windows(b"lume_get_state".len())
+            .any(|item| item == b"lume_get_state"));
+        assert_sections_are_well_sized(&bytes);
     }
 
     #[test]

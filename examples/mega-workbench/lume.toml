@@ -1,9 +1,10 @@
 [project]
-name = "lume-app"
+name = "mega-workbench"
 entry = "src/app.lume"
 out_dir = "dist"
 
+[build]
+target = "html-js-css-wasm"
+
 [frontend]
-routing = "spa"
 activation = "resume"
-hydration = "partial"

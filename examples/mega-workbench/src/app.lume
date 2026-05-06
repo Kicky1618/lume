@@ -1,0 +1,703 @@
+theme default {
+  color bg = "#0b1020"
+  color surface = "#121a2f"
+  color surfaceAlt = "#18223a"
+  color raised = "#f8fafc"
+  color ink = "#ecf4ff"
+  color inkDark = "#1f2937"
+  color muted = "#9fb0d0"
+  color accent = "#38bdf8"
+  color good = "#34d399"
+  color warn = "#f59e0b"
+  color danger = "#fb7185"
+  color violet = "#a78bfa"
+
+  space xs = 6
+  space sm = 10
+  space md = 16
+  space lg = 24
+  space xl = 32
+
+  radius sm = 8
+  radius md = 12
+  radius lg = 18
+}
+
+style appShell {
+  minHeight: 100vh
+  padding: 24
+  background: bg
+  color: ink
+}
+
+style workspace {
+  maxWidth: 1380
+  margin: 0 auto
+}
+
+style heroPanel {
+  padding: 28
+  background: surface
+  radius: lg
+}
+
+style raisedPanel {
+  padding: 20
+  background: raised
+  color: inkDark
+  radius: lg
+}
+
+style panel {
+  padding: 20
+  background: surface
+  color: ink
+  radius: lg
+}
+
+style softPanel {
+  padding: 18
+  background: surfaceAlt
+  color: ink
+  radius: md
+}
+
+style compactPanel {
+  padding: 12
+  background: surfaceAlt
+  color: ink
+  radius: sm
+}
+
+style chip {
+  padding: 8
+  background: surfaceAlt
+  color: ink
+  radius: 999
+}
+
+style lightChip {
+  padding: 8
+  background: raised
+  color: inkDark
+  radius: 999
+}
+
+style goodCard {
+  padding: 16
+  background: good
+  color: inkDark
+  radius: md
+}
+
+style warnCard {
+  padding: 16
+  background: warn
+  color: inkDark
+  radius: md
+}
+
+style dangerCard {
+  padding: 16
+  background: danger
+  color: inkDark
+  radius: md
+}
+
+style accentCard {
+  padding: 16
+  background: accent
+  color: inkDark
+  radius: md
+}
+
+style violetCard {
+  padding: 16
+  background: violet
+  color: inkDark
+  radius: md
+}
+
+server action publishIncident(title: String, owner: String, severity: i64): String csrf true invalidates ["incidents", title] rateLimit "30/min" transaction write {
+  return title + " assigned to " + owner
+}
+
+server action calculateCapacity(engineers: i64, focus: i64): i64 runtime "jit" {
+  return engineers * focus * 6
+}
+
+component StatCard(label: String, value: String, tone: String) {
+  view {
+    if tone == "good" {
+      Box style=goodCard {
+        Column gap=6 {
+          Text("{label}", size=12, weight=700)
+          Text("{value}", size=26, weight=800)
+        }
+      }
+    } else {
+      if tone == "warn" {
+        Box style=warnCard {
+          Column gap=6 {
+            Text("{label}", size=12, weight=700)
+            Text("{value}", size=26, weight=800)
+          }
+        }
+      } else {
+        if tone == "danger" {
+          Box style=dangerCard {
+            Column gap=6 {
+              Text("{label}", size=12, weight=700)
+              Text("{value}", size=26, weight=800)
+            }
+          }
+        } else {
+          Box style=accentCard {
+            Column gap=6 {
+              Text("{label}", size=12, weight=700)
+              Text("{value}", size=26, weight=800)
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+component SectionTitle(title: String, subtitle: String) {
+  view {
+    Column gap=6 {
+      Text("{title}", size=18, weight=800, color=ink)
+      Text("{subtitle}", size=13, color=muted)
+    }
+  }
+}
+
+component TaskRow(name: String, owner: String, status: String) {
+  view {
+    Box style=compactPanel {
+      Row gap=12 {
+        Column gap=4 {
+          Text("{name}", size=14, weight=800, color=ink)
+          Text("{owner}", size=12, color=muted)
+        }
+
+        Box style=chip {
+          Text("{status}", size=12, weight=700, color=accent)
+        }
+      }
+    }
+  }
+}
+
+component ActivityLine(label: String, detail: String) {
+  view {
+    Box style=compactPanel {
+      Column gap=4 {
+        Text("{label}", size=13, weight=800, color=ink)
+        Text("{detail}", size=12, color=muted)
+      }
+    }
+  }
+}
+
+component App {
+  state workspaceName: String = "Northstar Operations"
+  state commander: String = "Mina"
+  state incidentTitle: String = "Checkout latency spike"
+  state selectedLane: String = "Reliability"
+  state selectedTask: String = "Edge cache audit"
+  state selectedOwner: String = "Ari"
+  state severity: i64 = 2
+  state openIncidents: i64 = 7
+  state closedIncidents: i64 = 19
+  state activeDeploys: i64 = 4
+  state blockedDeploys: i64 = 1
+  state engineers: i64 = 9
+  state focus: i64 = 6
+  state capacity: i64 = 0
+  state risk: i64 = 41
+  state confidence: i64 = 78
+  state uptime: i64 = 99
+  state latency: i64 = 184
+  state errorBudget: i64 = 62
+  state backlog: i64 = 32
+  state automation: i64 = 58
+  state reviewDepth: i64 = 3
+  state note: String = "Morning handoff is ready."
+  state publishResult: String = ""
+  state showDeepDive: Bool = true
+  state showTimeline: Bool = true
+  state lanes: Array = ["Reliability", "Platform", "Product", "Security", "Data"]
+  state owners: Array = ["Ari", "Bo", "Cy", "Dia", "Eli", "Fia"]
+  state tasks: Array = ["Edge cache audit", "Queue drain drill", "Billing replay", "Search rollout", "Secrets rotation", "Dataset compaction"]
+  state signals: Array = ["latency", "deploys", "budget", "backlog", "confidence", "automation"]
+  state activity: Array = ["canary promoted", "budget checked", "owner paged", "docs refreshed", "route verified"]
+
+  action resetBoard {
+    severity = 2
+    openIncidents = 7
+    closedIncidents = 19
+    activeDeploys = 4
+    blockedDeploys = 1
+    risk = 41
+    confidence = 78
+    uptime = 99
+    latency = 184
+    errorBudget = 62
+    backlog = 32
+    automation = 58
+    reviewDepth = 3
+    note = "Morning handoff is ready."
+    publishResult = ""
+    showDeepDive = true
+    showTimeline = true
+  }
+
+  action escalate {
+    severity += 1
+    openIncidents += 1
+    risk += 8
+    confidence -= 4
+    errorBudget -= 3
+  }
+
+  action mitigate {
+    closedIncidents += 1
+    openIncidents -= 1
+    risk -= 6
+    confidence += 3
+    errorBudget += 2
+  }
+
+  action startDeploy {
+    activeDeploys += 1
+    confidence -= 2
+    latency += 7
+  }
+
+  action blockDeploy {
+    blockedDeploys += 1
+    risk += 5
+  }
+
+  action clearBlock {
+    blockedDeploys -= 1
+    confidence += 2
+  }
+
+  action improveAutomation {
+    automation += 5
+    backlog -= 2
+  }
+
+  action deepenReview {
+    reviewDepth += 1
+    confidence += 1
+  }
+
+  view {
+    Box style=appShell {
+      Box style=workspace {
+        Column gap=24 {
+          Box style=heroPanel {
+            Column gap=18 {
+              Row gap=8 {
+                Box style=chip {
+                  Text("mega-workbench", size=12, weight=800, color=accent)
+                }
+
+                Box style=chip {
+                  Text("{selectedLane}", size=12, weight=800, color=good)
+                }
+
+                Box style=chip {
+                  Text("commander: {commander}", size=12, weight=800, color=muted)
+                }
+              }
+
+              Column gap=8 {
+                Text("{workspaceName}", as="h1", size=44, weight=900, color=ink)
+                Text("A large Lume example that exercises state, WASM-backed numeric updates, server actions, loops, conditionals, composed components, theme tokens, and resumable markers.", size=15, color=muted)
+              }
+
+              Grid columns=5 gap=12 {
+                StatCard(label="Open", value="{openIncidents}", tone="danger")
+                StatCard(label="Closed", value="{closedIncidents}", tone="good")
+                StatCard(label="Deploys", value="{activeDeploys}", tone="accent")
+                StatCard(label="Blocked", value="{blockedDeploys}", tone="warn")
+                StatCard(label="Risk", value="{risk}", tone="danger")
+              }
+            }
+          }
+
+          Grid columns=3 gap=18 {
+            Box style=panel {
+              Column gap=14 {
+                SectionTitle(title="Incident Command", subtitle="Change live state, publish server metadata, and force several UI branches.")
+
+                Input(value=incidentTitle, label="Incident title", placeholder="Describe the incident") {
+                  on input(value) {
+                    incidentTitle = value
+                  }
+                }
+
+                Input(value=commander, label="Commander", placeholder="Owner name") {
+                  on input(value) {
+                    commander = value
+                    selectedOwner = value
+                  }
+                }
+
+                Row gap=8 {
+                  Button("Escalate") {
+                    on click {
+                      escalate()
+                    }
+                  }
+
+                  Button("Mitigate") {
+                    on click {
+                      mitigate()
+                    }
+                  }
+
+                  Button("Reset") {
+                    on click {
+                      resetBoard()
+                    }
+                  }
+                }
+
+                Row gap=8 {
+                  Button("Publish") {
+                    on click {
+                      publishResult = await publishIncident(incidentTitle, commander, severity)
+                    }
+                  }
+
+                  Button("Capacity") {
+                    on click {
+                      capacity = await calculateCapacity(engineers, focus)
+                    }
+                  }
+                }
+
+                if publishResult != "" {
+                  Box style=softPanel {
+                    Text("Published: {publishResult}", size=14, weight=800, color=good)
+                  }
+                } else {
+                  Box style=softPanel {
+                    Text("No incident has been published yet.", size=14, color=muted)
+                  }
+                }
+              }
+            }
+
+            Box style=panel {
+              Column gap=14 {
+                SectionTitle(title="Deployment Controls", subtitle="Small numeric mutations route through the generated WASM dispatch path when possible.")
+
+                Grid columns=2 gap=10 {
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Active deploys", size=12, weight=700, color=muted)
+                      Text("{activeDeploys}", size=28, weight=900, color=accent)
+                    }
+                  }
+
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Blocked deploys", size=12, weight=700, color=muted)
+                      Text("{blockedDeploys}", size=28, weight=900, color=warn)
+                    }
+                  }
+                }
+
+                Row gap=8 {
+                  Button("Start deploy") {
+                    on click {
+                      startDeploy()
+                    }
+                  }
+
+                  Button("Block deploy") {
+                    on click {
+                      blockDeploy()
+                    }
+                  }
+
+                  Button("Clear block") {
+                    on click {
+                      clearBlock()
+                    }
+                  }
+                }
+
+                Row gap=8 {
+                  Button("Automation +") {
+                    on click {
+                      improveAutomation()
+                    }
+                  }
+
+                  Button("Review +") {
+                    on click {
+                      deepenReview()
+                    }
+                  }
+                }
+              }
+            }
+
+            Box style=raisedPanel {
+              Column gap=14 {
+                Text("Planning Inputs", size=18, weight=900, color=inkDark)
+                Text("These values feed the JIT-tagged server action and the local dashboard cards.", size=13, color=inkDark)
+
+                Row gap=8 {
+                  Button("- Engineer") {
+                    on click {
+                      engineers -= 1
+                    }
+                  }
+
+                  Button("+ Engineer") {
+                    on click {
+                      engineers += 1
+                    }
+                  }
+                }
+
+                Row gap=8 {
+                  Button("- Focus") {
+                    on click {
+                      focus -= 1
+                    }
+                  }
+
+                  Button("+ Focus") {
+                    on click {
+                      focus += 1
+                    }
+                  }
+                }
+
+                Grid columns=3 gap=10 {
+                  Box style=lightChip {
+                    Text("Engineers {engineers}", size=12, weight=800)
+                  }
+
+                  Box style=lightChip {
+                    Text("Focus {focus}", size=12, weight=800)
+                  }
+
+                  Box style=lightChip {
+                    Text("Capacity {capacity}", size=12, weight=800)
+                  }
+                }
+              }
+            }
+          }
+
+          Grid columns=2 gap=18 {
+            Box style=panel {
+              Column gap=16 {
+                SectionTitle(title="Lane Picker", subtitle="Loop scopes, click handlers, and selected state all update this dense task surface.")
+
+                Grid columns=5 gap=8 {
+                  for lane in lanes {
+                    Box style=compactPanel {
+                      Column gap=8 {
+                        Text("{lane}", size=13, weight=800, color=ink)
+                        Button("Select") {
+                          on click {
+                            selectedLane = lane
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                Grid columns=2 gap=10 {
+                  for task in tasks {
+                    Box style=compactPanel {
+                      Column gap=8 {
+                        Text("{task}", size=14, weight=800, color=ink)
+                        Row gap=8 {
+                          Button("Pick task") {
+                            on click {
+                              selectedTask = task
+                            }
+                          }
+
+                          Button("Backlog +") {
+                            on click {
+                              backlog += 1
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+
+            Box style=panel {
+              Column gap=16 {
+                SectionTitle(title="Owner Matrix", subtitle="Every owner can take the selected task and update local confidence.")
+
+                Grid columns=3 gap=10 {
+                  for owner in owners {
+                    Box style=compactPanel {
+                      Column gap=8 {
+                        Text("{owner}", size=18, weight=900, color=accent)
+                        Text("Ready for {selectedTask}", size=12, color=muted)
+                        Button("Assign") {
+                          on click {
+                            selectedOwner = owner
+                            confidence += 1
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                TaskRow(name=selectedTask, owner=selectedOwner, status=selectedLane)
+
+                if confidence > 80 {
+                  Box style=goodCard {
+                    Text("Confidence is high enough for an aggressive rollout.", size=14, weight=800)
+                  }
+                } else {
+                  Box style=warnCard {
+                    Text("Confidence is moderate. Keep review depth visible.", size=14, weight=800)
+                  }
+                }
+              }
+            }
+          }
+
+          Grid columns=3 gap=18 {
+            Box style=panel {
+              Column gap=14 {
+                SectionTitle(title="Signal Wall", subtitle="A wide grid of repeated render nodes used for snapshot and hydration pressure.")
+
+                for signal in signals {
+                  ActivityLine(label=signal, detail="tracked in the current command cycle")
+                }
+
+                Grid columns=2 gap=10 {
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Uptime", size=12, weight=700, color=muted)
+                      Text("{uptime}", size=24, weight=900, color=good)
+                    }
+                  }
+
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Latency", size=12, weight=700, color=muted)
+                      Text("{latency}ms", size=24, weight=900, color=warn)
+                    }
+                  }
+
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Budget", size=12, weight=700, color=muted)
+                      Text("{errorBudget}", size=24, weight=900, color=accent)
+                    }
+                  }
+
+                  Box style=softPanel {
+                    Column gap=6 {
+                      Text("Backlog", size=12, weight=700, color=muted)
+                      Text("{backlog}", size=24, weight=900, color=danger)
+                    }
+                  }
+                }
+              }
+            }
+
+            Box style=panel {
+              Column gap=14 {
+                SectionTitle(title="Timeline", subtitle="Toggling this section exercises conditional branches around loop output.")
+
+                Button("Toggle timeline") {
+                  on click {
+                    showTimeline = !showTimeline
+                  }
+                }
+
+                if showTimeline {
+                  Column gap=8 {
+                    for item in activity {
+                      ActivityLine(label=item, detail="recorded by the workbench event stream")
+                    }
+                  }
+                } else {
+                  Box style=softPanel {
+                    Text("Timeline hidden for a calmer review.", size=14, color=muted)
+                  }
+                }
+              }
+            }
+
+            Box style=panel {
+              Column gap=14 {
+                SectionTitle(title="Deep Dive", subtitle="This branch contains extra state mirrors and controls.")
+
+                Button("Toggle deep dive") {
+                  on click {
+                    showDeepDive = !showDeepDive
+                  }
+                }
+
+                if showDeepDive {
+                  Column gap=10 {
+                    TaskRow(name="Risk model", owner=commander, status="{risk}")
+                    TaskRow(name="Automation plan", owner=selectedOwner, status="{automation}")
+                    TaskRow(name="Review depth", owner=selectedLane, status="{reviewDepth}")
+
+                    Input(value=note, label="Handoff note", placeholder="Write the shift note") {
+                      on input(value) {
+                        note = value
+                      }
+                    }
+
+                    Box style=softPanel {
+                      Text("{note}", size=14, color=ink)
+                    }
+                  }
+                } else {
+                  Box style=softPanel {
+                    Text("Deep dive collapsed.", size=14, color=muted)
+                  }
+                }
+              }
+            }
+          }
+
+          Box style=heroPanel {
+            Column gap=14 {
+              Text("End-to-end state summary", size=22, weight=900, color=ink)
+
+              Grid columns=4 gap=10 {
+                StatCard(label="Selected lane", value="{selectedLane}", tone="accent")
+                StatCard(label="Selected owner", value="{selectedOwner}", tone="good")
+                StatCard(label="Automation", value="{automation}", tone="accent")
+                StatCard(label="Review depth", value="{reviewDepth}", tone="warn")
+              }
+
+              Text("Current task: {selectedTask}. Incident: {incidentTitle}. Commander: {commander}. Capacity: {capacity}.", size=14, color=muted)
+            }
+          }
+        }
+      }
+    }
+  }
+}

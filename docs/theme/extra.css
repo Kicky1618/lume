@@ -1,0 +1,195 @@
+:root {
+  --lume-bg: #f3efe7;
+  --lume-surface: rgba(255, 255, 255, 0.82);
+  --lume-surface-strong: rgba(255, 255, 255, 0.94);
+  --lume-text: #1f2328;
+  --lume-muted: #5f6772;
+  --lume-border: rgba(31, 35, 40, 0.11);
+  --lume-accent: #0f766e;
+  --lume-accent-soft: rgba(15, 118, 110, 0.12);
+  --lume-shadow: 0 24px 64px rgba(31, 35, 40, 0.10);
+  --lume-code-bg: #111827;
+  --lume-code-fg: #f8fafc;
+  --lume-code-inline-bg: rgba(15, 118, 110, 0.08);
+  --lume-table-head-bg: rgba(15, 118, 110, 0.06);
+  --lume-link-hover: #0b5f5a;
+  --lume-body-gradient:
+    radial-gradient(circle at top left, rgba(15, 118, 110, 0.12), transparent 32%),
+    radial-gradient(circle at top right, rgba(180, 120, 30, 0.14), transparent 28%),
+    linear-gradient(180deg, #fbf7f0 0%, var(--lume-bg) 100%);
+}
+
+html.light {
+  color-scheme: light;
+}
+
+html.navy,
+html.coal,
+html.ayu {
+  --lume-bg: #0b1020;
+  --lume-surface: rgba(14, 20, 35, 0.84);
+  --lume-surface-strong: rgba(20, 28, 46, 0.94);
+  --lume-text: #e5eef8;
+  --lume-muted: #a9b4c7;
+  --lume-border: rgba(229, 238, 248, 0.12);
+  --lume-accent: #38bdf8;
+  --lume-accent-soft: rgba(56, 189, 248, 0.12);
+  --lume-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+  --lume-code-bg: #111827;
+  --lume-code-fg: #f8fafc;
+  --lume-code-inline-bg: rgba(56, 189, 248, 0.12);
+  --lume-table-head-bg: rgba(56, 189, 248, 0.09);
+  --lume-link-hover: #7dd3fc;
+  --lume-body-gradient:
+    radial-gradient(circle at top left, rgba(56, 189, 248, 0.16), transparent 32%),
+    radial-gradient(circle at top right, rgba(180, 120, 30, 0.10), transparent 28%),
+    linear-gradient(180deg, #0f172a 0%, var(--lume-bg) 100%);
+  color-scheme: dark;
+}
+
+html,
+body {
+  background: var(--lume-body-gradient);
+  color: var(--lume-text);
+}
+
+body {
+  font-family:
+    Inter, "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", "Yu Gothic",
+    system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.8;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--lume-accent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.16em;
+}
+
+a:hover {
+  color: var(--lume-link-hover);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+#content,
+#mdbook-content {
+  background: var(--lume-surface);
+  border: 1px solid var(--lume-border);
+  box-shadow: var(--lume-shadow);
+  border-radius: 20px;
+  margin: 1.25rem auto 2rem;
+  padding: 2rem 2.25rem 2.5rem;
+  max-width: 980px;
+  backdrop-filter: blur(10px);
+}
+
+#content h1,
+#mdbook-content h1 {
+  font-size: clamp(2rem, 4vw, 3rem);
+  margin-top: 0;
+}
+
+#content h2,
+#mdbook-content h2 {
+  margin-top: 2.5rem;
+  padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--lume-border);
+}
+
+#content p,
+#content li,
+#content table,
+#mdbook-content p,
+#mdbook-content li,
+#mdbook-content table {
+  color: var(--lume-text);
+}
+
+#content .table-wrapper,
+#mdbook-content .table-wrapper {
+  overflow-x: auto;
+}
+
+pre,
+code,
+kbd,
+samp {
+  font-family:
+    "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
+    monospace;
+}
+
+pre {
+  background: var(--lume-code-bg);
+  color: var(--lume-code-fg);
+  border-radius: 16px;
+  padding: 1rem 1.1rem;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+pre code {
+  background: transparent;
+  color: inherit;
+}
+
+code {
+  background: var(--lume-code-inline-bg);
+  border-radius: 6px;
+  padding: 0.12rem 0.35rem;
+}
+
+blockquote {
+  border-left: 4px solid var(--lume-accent);
+  background: var(--lume-accent-soft);
+  border-radius: 0 14px 14px 0;
+  padding: 0.8rem 1rem;
+  margin-left: 0;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.97rem;
+}
+
+th,
+td {
+  border: 1px solid var(--lume-border);
+  padding: 0.7rem 0.85rem;
+  vertical-align: top;
+}
+
+th {
+  background: var(--lume-table-head-bg);
+}
+
+hr {
+  border: 0;
+  border-top: 1px solid var(--lume-border);
+  margin: 2rem 0;
+}
+
+img {
+  max-width: 100%;
+  border-radius: 16px;
+}
+
+@media (max-width: 860px) {
+  #content,
+  #mdbook-content {
+    margin: 0.75rem;
+    padding: 1.25rem 1rem 1.75rem;
+    border-radius: 16px;
+  }
+}

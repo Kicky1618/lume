@@ -1,4 +1,4 @@
-use lume_ast::{Attribute, ElementNode, Expr, StyleDecl, ThemeDecl, ViewBlock, ViewNode};
+use lume_ast::{Arg, Attribute, ElementNode, Expr, StyleDecl, ThemeDecl, ViewBlock, ViewNode};
 use lume_ir::LumeProgram;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -29,10 +29,21 @@ pub fn generate(program: &LumeProgram) -> String {
     css.push_str("}\n\n");
     css.push_str("body {\n  margin: 0;\n  font-family: system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif;\n  color: #111827;\n  background: #ffffff;\n}\n\n");
     css.push_str(".l-box { box-sizing: border-box; }\n");
+    css.push_str(".l-container { box-sizing: border-box; width: 100%; margin-inline: auto; }\n");
     css.push_str(".l-row { display: flex; flex-direction: row; }\n");
     css.push_str(".l-col { display: flex; flex-direction: column; }\n");
     css.push_str(".l-grid { display: grid; }\n");
     css.push_str(".l-stack { display: grid; }\n.l-stack > * { grid-area: 1 / 1; }\n\n");
+    css.push_str(".l-field { display: flex; flex-direction: column; gap: 0.375rem; }\n");
+    css.push_str(".l-field-label { display: flex; flex-direction: column; gap: 0.375rem; }\n");
+    css.push_str(".l-visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }\n");
+    css.push_str(".l-spacer { flex: 0 0 auto; }\n");
+    css.push_str(".l-modal, .l-dialog { border: 0; padding: 1rem; max-width: min(42rem, calc(100vw - 2rem)); }\n");
+    css.push_str(".l-tabs { display: flex; gap: 0.5rem; align-items: center; }\n");
+    css.push_str(".l-table { border-collapse: collapse; width: 100%; }\n");
+    css.push_str(".l-focus-trap { outline: none; }\n");
+    css.push_str(".l-landmark { box-sizing: border-box; }\n\n");
+    css.push_str(".l-router, .l-route { display: contents; }\n\n");
     for style in &program.styles {
         emit_style_decl(style, &tokens, &mut spaces, &mut css);
     }
@@ -75,8 +86,23 @@ fn collect_element(
 ) {
     let mut props = Vec::new();
     for attr in &element.attrs {
-        if let Some((css_name, value)) = style_prop(attr, tokens, spaces) {
+        if let Some((css_name, value)) = style_prop(&element.name, attr, tokens, spaces) {
             props.push((css_name, value));
+        }
+    }
+    for arg in &element.args {
+        let Arg::Named(name, value) = arg else {
+            continue;
+        };
+        if let Some(css_name) = css_property_name_for_element(&element.name, name) {
+            let value_name = match (element.name.as_str(), name.as_str()) {
+                ("Text", "align") => "textAlign",
+                _ => name.as_str(),
+            };
+            props.push((
+                css_name.into(),
+                css_value(value_name, value, tokens, spaces),
+            ));
         }
     }
     if !props.is_empty() {
@@ -90,6 +116,7 @@ fn collect_element(
 pub fn layout_class(name: &str) -> Option<&'static str> {
     match name {
         "Box" => Some("l-box"),
+        "Container" => Some("l-container"),
         "Row" => Some("l-row"),
         "Column" => Some("l-col"),
         "Grid" => Some("l-grid"),
@@ -107,13 +134,18 @@ pub fn style_ref_class(name: &str) -> String {
 }
 
 fn style_prop(
+    element_name: &str,
     attr: &Attribute,
     tokens: &HashMap<String, String>,
     spaces: &mut BTreeSet<String>,
 ) -> Option<(String, String)> {
     let value = attr.value.as_ref()?;
-    let css_name = css_property_name(&attr.name)?;
-    let value = css_value(&attr.name, value, tokens, spaces);
+    let css_name = css_property_name_for_element(element_name, &attr.name)?;
+    let value_name = match (element_name, attr.name.as_str()) {
+        ("Text", "align") => "textAlign",
+        _ => &attr.name,
+    };
+    let value = css_value(value_name, value, tokens, spaces);
     Some((css_name.into(), value))
 }
 
@@ -130,15 +162,17 @@ fn css_value(
     if let Some(var) = token_var_for_property(name, raw, tokens) {
         return format!("var({var})");
     }
+    if is_unitless_property(name) {
+        return keyword_value(name, raw);
+    }
+    if raw == "0" {
+        return "0".into();
+    }
     if raw.chars().all(|c| c.is_ascii_digit()) {
         spaces.insert(raw.to_string());
         format!("var(--lume-space-{raw})")
     } else {
-        match raw {
-            "center" => "center".into(),
-            "between" => "space-between".into(),
-            other => other.into(),
-        }
+        keyword_value(name, raw)
     }
 }
 
@@ -238,15 +272,52 @@ fn css_property_name(name: &str) -> Option<&'static str> {
         "margin" => Some("margin"),
         "width" => Some("width"),
         "height" => Some("height"),
+        "minWidth" => Some("min-width"),
+        "maxWidth" => Some("max-width"),
+        "minHeight" => Some("min-height"),
+        "maxHeight" => Some("max-height"),
         "align" => Some("align-items"),
+        "textAlign" => Some("text-align"),
         "justify" => Some("justify-content"),
         "columns" => Some("grid-template-columns"),
         "background" => Some("background"),
         "color" => Some("color"),
         "radius" => Some("border-radius"),
         "fontSize" => Some("font-size"),
+        "size" => Some("font-size"),
         "weight" => Some("font-weight"),
+        "opacity" => Some("opacity"),
+        "transform" => Some("transform"),
         _ => None,
+    }
+}
+
+fn css_property_name_for_element(element_name: &str, name: &str) -> Option<&'static str> {
+    match (element_name, name) {
+        ("Text", "align") => Some("text-align"),
+        _ => css_property_name(name),
+    }
+}
+
+pub fn is_style_attr(name: &str) -> bool {
+    css_property_name(name).is_some()
+}
+
+fn is_unitless_property(name: &str) -> bool {
+    matches!(name, "weight" | "opacity")
+}
+
+fn keyword_value(property: &str, raw: &str) -> String {
+    match (property, raw) {
+        ("align", "start") | ("justify", "start") => "flex-start".into(),
+        ("align", "end") | ("justify", "end") => "flex-end".into(),
+        ("justify", "between") => "space-between".into(),
+        ("textAlign", "start") => "start".into(),
+        ("textAlign", "end") => "end".into(),
+        (_, raw) => match raw {
+            "between" => "space-between".into(),
+            other => other.into(),
+        },
     }
 }
 
@@ -269,7 +340,7 @@ fn token_var_for_property<'a>(
     tokens: &'a HashMap<String, String>,
 ) -> Option<&'a String> {
     let preferred = match property {
-        "padding" | "margin" | "gap" | "width" | "height" | "fontSize" => {
+        "padding" | "margin" | "gap" | "width" | "height" | "fontSize" | "size" => {
             ["space", "breakpoint", "radius", "color"]
         }
         "radius" => ["radius", "space", "breakpoint", "color"],
@@ -366,5 +437,55 @@ component App {
         assert!(css.contains("border-radius: var(--lume-radius-md);"));
         assert!(css.contains(".l-style-card:hover"));
         assert!(css.contains("@media (min-width: 768px)"));
+    }
+
+    #[test]
+    fn lowers_documented_style_values_and_state_shorthand() {
+        let source = r##"
+theme default {
+  color primary = "#4f46e5"
+  color primaryHover = "#4338ca"
+  color text = "#111827"
+  space md = 16
+}
+
+style button {
+  maxWidth: 320
+  margin: 0 auto
+  background: primary
+
+  hover background: primaryHover
+
+  active {
+    transform: scale(0.98)
+  }
+
+  disabled {
+    opacity: 0.5
+  }
+}
+
+component App {
+  view {
+    Column gap=md minHeight=100vh {
+      Text("Hello", align=center, color=text, weight=700)
+      Button("Save", style=button)
+    }
+  }
+}
+"##;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let css = generate(&ir);
+        assert!(css.contains("max-width: var(--lume-space-320);"));
+        assert!(css.contains("margin: 0 auto;"));
+        assert!(css.contains(".l-style-button:hover"));
+        assert!(css.contains("background: var(--lume-color-primaryHover);"));
+        assert!(css.contains("transform: scale(0.98);"));
+        assert!(css.contains("opacity: 0.5;"));
+        assert!(css.contains("min-height: 100vh;"));
+        assert!(css.contains("text-align: center;"));
+        assert!(css.contains("font-weight: 700;"));
     }
 }

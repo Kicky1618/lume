@@ -1,5 +1,16 @@
 ## 41. 構文の EBNF 概略
 
+この章では、Lume の構文を機械的に扱うための形に落とし込む。EBNF、AST、メモリモデルの順に、構文がどう内部表現へ変わるかを見る。
+
+```txt
+source text
+  -> EBNF
+  -> AST nodes
+  -> memory / ownership model
+```
+
+構文規則そのものだけでなく、後段のパーサや変換処理が何を前提にしているかを意識すると追いやすい。
+
 ```ebnf
 Program            = { TopLevelDecl } ;
 
@@ -199,4 +210,3 @@ pub enum ResumeFallback {
 `captures` には resumable action が参照する state、props、derived 値、Server Action stub を記録する。capture graph に非直列化値または server-only 値が含まれる場合、resumability 診断を発行する。
 
 ---
-

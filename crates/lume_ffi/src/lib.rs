@@ -749,7 +749,10 @@ pub mod ast {
             module.runtime = if decl.runtime.is_empty() {
                 vec![FfiRuntime::Native]
             } else {
-                decl.runtime.iter().map(|value| FfiRuntime::parse(value)).collect()
+                decl.runtime
+                    .iter()
+                    .map(|value| FfiRuntime::parse(value))
+                    .collect()
             };
             module.safety = SafetyLevel::parse(decl.safety.as_deref());
             module.thread_safe = decl.thread_safe;

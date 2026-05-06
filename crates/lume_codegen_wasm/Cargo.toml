@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 inkwell.workspace = true
+lume_ast = { path = "../lume_ast" }
 lume_ir = { path = "../lume_ir" }
 
 [dev-dependencies]

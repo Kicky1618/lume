@@ -152,6 +152,7 @@ name = "lume_codegen_wasm"
 version = "0.2.0"
 dependencies = [
  "inkwell",
+ "lume_ast",
  "lume_hir",
  "lume_ir",
  "lume_parser",
@@ -168,6 +169,7 @@ dependencies = [
 name = "lume_driver"
 version = "0.2.0"
 dependencies = [
+ "lume_ast",
  "lume_backend_native",
  "lume_codegen_css",
  "lume_codegen_html",

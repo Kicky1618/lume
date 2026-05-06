@@ -1,5 +1,5 @@
 use lume_ast::{Arg, AssignOp, ComponentItem, ElementNode, Expr, Stmt, ViewBlock, ViewNode};
-use lume_codegen_css::{layout_class, style_class_for, style_ref_class};
+use lume_codegen_css::{is_style_attr, layout_class, style_class_for, style_ref_class};
 use lume_codegen_html::{EventBinding, HtmlOutput};
 use lume_ir::LumeProgram;
 use std::collections::{BTreeSet, HashSet};
@@ -9,6 +9,15 @@ pub fn generate(program: &LumeProgram, html: &HtmlOutput) -> String {
 }
 
 pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled: bool) -> String {
+    generate_with_options(program, html, wasm_enabled, true)
+}
+
+pub fn generate_with_options(
+    program: &LumeProgram,
+    html: &HtmlOutput,
+    wasm_enabled: bool,
+    resume: bool,
+) -> String {
     let state_names = program
         .states()
         .map(|state| state.name.clone())
@@ -28,8 +37,18 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
     }
     js.push_str("};\n\n");
     js.push_str("const state = {};\n\n");
+    js.push_str("let resumableManifest = null;\n\n");
     if wasm_enabled {
         js.push_str("const lumeWasm = await loadLumeWasm();\n\n");
+        js.push_str("const lumeWasmStateNames = [");
+        js.push_str(
+            &program
+                .states()
+                .map(|state| format!("{:?}", state.name))
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        js.push_str("];\n\n");
         js.push_str("async function loadLumeWasm() {\n");
         js.push_str("  const fallback = { enabled: false, exports: {}, error: null };\n");
         js.push_str("  try {\n");
@@ -53,6 +72,36 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
         js.push_str("    console.warn(\"Lume WASM runtime could not be loaded; continuing with JavaScript runtime.\", error);\n");
         js.push_str("    return { ...fallback, error };\n");
         js.push_str("  }\n");
+        js.push_str("}\n\n");
+        js.push_str("function syncWasmState() {\n");
+        js.push_str("  if (!lumeWasm.enabled || typeof lumeWasm.exports.lume_set_state !== \"function\") return;\n");
+        js.push_str("  for (let index = 0; index < lumeWasmStateNames.length; index += 1) {\n");
+        js.push_str("    const value = state[lumeWasmStateNames[index]];\n");
+        js.push_str(
+            "    if (Number.isFinite(value)) lumeWasm.exports.lume_set_state(index, value | 0);\n",
+        );
+        js.push_str("  }\n");
+        js.push_str("}\n\n");
+        js.push_str("function applyWasmPatch(ptr) {\n");
+        js.push_str("  if (!ptr || !(lumeWasm.exports.memory instanceof WebAssembly.Memory)) return false;\n");
+        js.push_str("  const getLen = lumeWasm.exports.lume_get_patch_len;\n");
+        js.push_str("  const len = typeof getLen === \"function\" ? getLen(ptr) : 0;\n");
+        js.push_str("  if (!len || len % 8 !== 0) return false;\n");
+        js.push_str(
+            "  const words = new Int32Array(lumeWasm.exports.memory.buffer, ptr, len / 4);\n",
+        );
+        js.push_str("  for (let offset = 0; offset < words.length; offset += 2) {\n");
+        js.push_str("    const name = lumeWasmStateNames[words[offset]];\n");
+        js.push_str("    if (name) state[name] = words[offset + 1];\n");
+        js.push_str("  }\n");
+        js.push_str("  return true;\n");
+        js.push_str("}\n\n");
+        js.push_str("async function dispatchWasmEvent(id) {\n");
+        js.push_str("  const dispatch = lumeWasm.exports.lume_dispatch;\n");
+        js.push_str("  if (!lumeWasm.enabled || typeof dispatch !== \"function\") return false;\n");
+        js.push_str("  syncWasmState();\n");
+        js.push_str("  const ptr = dispatch(id, 0, 0);\n");
+        js.push_str("  return applyWasmPatch(ptr);\n");
         js.push_str("}\n\n");
     }
     if !program.server_actions.is_empty() {
@@ -121,16 +170,36 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
         }
     }
     js.push_str(&component_actions_js(program, &state_names));
-    js.push_str("async function restoreInitialState() {\n");
+    js.push_str("function restoreInlineSerializedState() {\n");
+    js.push_str("  const script = document.getElementById(\"lume-state-s0\");\n");
+    js.push_str(
+        "  if (!script || script.getAttribute(\"type\") !== \"application/lume-state\") return;\n",
+    );
+    js.push_str("  try {\n");
+    js.push_str("    const payload = JSON.parse(script.textContent || \"{}\");\n");
+    js.push_str(
+        "    if (payload && typeof payload === \"object\") Object.assign(state, payload);\n",
+    );
+    js.push_str("  } catch (_) {}\n");
+    js.push_str("}\n\n");
+    js.push_str("\nasync function restoreInitialState() {\n");
     js.push_str("  Object.assign(state, fallbackState);\n");
     js.push_str("  try {\n");
     js.push_str("    const response = await fetch(\"/assets/lume.manifest.json\");\n");
-    js.push_str("    if (!response.ok) return;\n");
+    js.push_str("    if (!response.ok) throw new Error(\"manifest unavailable\");\n");
     js.push_str("    const manifest = await response.json();\n");
+    js.push_str("    resumableManifest = manifest;\n");
     js.push_str("    for (const item of manifest.state || []) {\n");
     js.push_str("      state[item.name] = item.initial;\n");
     js.push_str("    }\n");
+    js.push_str("    const serializedScope = manifest.serializedState?.s0;\n");
+    js.push_str(
+        "    if (serializedScope?.value && typeof serializedScope.value === \"object\") {\n",
+    );
+    js.push_str("      Object.assign(state, serializedScope.value);\n");
+    js.push_str("    }\n");
     js.push_str("  } catch (_) {}\n");
+    js.push_str("  restoreInlineSerializedState();\n");
     js.push_str("}\n\n");
     js.push_str("const root = document.getElementById(\"lume-root\");\n");
     if dynamic_view {
@@ -144,7 +213,10 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
         js.push_str("  return encodeURIComponent(JSON.stringify(scope));\n");
         js.push_str("}\n\n");
         if let Some(view) = program.view() {
-            let mut ctx = RenderCtx::default();
+            let mut ctx = RenderCtx {
+                resume,
+                ..RenderCtx::default()
+            };
             if !program.routes.is_empty() {
                 js.push_str(&route_runtime(program, &mut ctx, &state_names));
             }
@@ -276,6 +348,16 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
                 js.push_str("    const value = event.target.value;\n");
             }
         }
+        if wasm_enabled && event.loop_params.is_empty() && event.params.is_empty() {
+            js.push_str(&format!(
+                "    if (await dispatchWasmEvent({})) {{\n",
+                event.id
+            ));
+            js.push_str("      render_all();\n");
+            js.push_str("      persistStateScope();\n");
+            js.push_str("      return;\n");
+            js.push_str("    }\n");
+        }
         let locals = event_locals(event);
         for stmt in &event.statements {
             js.push_str("    ");
@@ -283,9 +365,35 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
             js.push('\n');
         }
         js.push_str("    render_all();\n");
+        js.push_str("    persistStateScope();\n");
         js.push_str("  },\n");
     }
     js.push_str("};\n\n");
+    js.push_str("const resumableSymbols = {\n");
+    for event in &html.events {
+        js.push_str(&format!(
+            "  \"sym_event_{}\": actions[{}],\n",
+            event.id, event.id
+        ));
+    }
+    js.push_str("};\n\n");
+    js.push_str("async function runSymbol(symbol, event, target) {\n");
+    js.push_str("  const local = resumableSymbols[symbol];\n");
+    js.push_str("  if (local) {\n");
+    js.push_str("    await local(event, target);\n");
+    js.push_str("    return;\n");
+    js.push_str("  }\n");
+    js.push_str("  if (!resumableManifest) return;\n");
+    js.push_str("  const symbolEntry = resumableManifest.symbols?.[symbol];\n");
+    js.push_str("  if (!symbolEntry || !symbolEntry.chunk) return;\n");
+    js.push_str("  try {\n");
+    js.push_str("    const mod = await import(symbolEntry.chunk);\n");
+    js.push_str("    const handler = mod?.default || mod?.run || mod?.[symbol];\n");
+    js.push_str(
+        "    if (typeof handler === \"function\") await handler({ event, target, state, root });\n",
+    );
+    js.push_str("  } catch (_) {}\n");
+    js.push_str("}\n\n");
     let event_names = html
         .events
         .iter()
@@ -295,8 +403,22 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
         js.push_str(&format!(
             "root.addEventListener(\"{event_name}\", event => {{\n"
         ));
-        js.push_str("  const target = event.target.closest(\"[data-lume-event]\");\n");
+        js.push_str(
+            "  const target = event.target.closest(\"[data-lume-on],[data-lume-event]\");\n",
+        );
         js.push_str("  if (!target) return;\n");
+        js.push_str("  const resumeSpec = target.getAttribute(\"data-lume-on\");\n");
+        js.push_str("  if (resumeSpec) {\n");
+        js.push_str("    const sep = resumeSpec.indexOf(':');\n");
+        js.push_str("    if (sep > 0) {\n");
+        js.push_str("      const resumeEvent = resumeSpec.slice(0, sep);\n");
+        js.push_str("      const resumeSymbol = resumeSpec.slice(sep + 1);\n");
+        js.push_str(&format!("      if (resumeEvent === \"{event_name}\") {{\n"));
+        js.push_str("        void runSymbol(resumeSymbol, event, target);\n");
+        js.push_str("        return;\n");
+        js.push_str("      }\n");
+        js.push_str("    }\n");
+        js.push_str("  }\n");
         js.push_str("  const eventSpec = target.getAttribute(\"data-lume-event\");\n");
         for event in html.events.iter().filter(|event| event.event == event_name) {
             js.push_str(&format!(
@@ -329,8 +451,23 @@ pub fn generate_with_wasm(program: &LumeProgram, html: &HtmlOutput, wasm_enabled
         js.push_str("  });\n");
         js.push_str("});\n\n");
     }
+    js.push_str("function persistStateScope(id = \"s0\") {\n");
+    js.push_str("  const script = document.getElementById(`lume-state-${id}`);\n");
+    js.push_str(
+        "  if (!script || script.getAttribute(\"type\") !== \"application/lume-state\") return;\n",
+    );
+    js.push_str("  script.textContent = JSON.stringify(state);\n");
+    js.push_str("}\n\n");
     js.push_str("await restoreInitialState();\n");
-    js.push_str("render_all();\n");
+    if resume {
+        js.push_str("if (!root?.dataset?.lumeR) console.warn(\"warning[LUME1026]: boundary fell back to hydration\");\n");
+        js.push_str("void drawNativeCanvases();\n");
+        if !program.routes.is_empty() {
+            js.push_str("updateNavLinks();\n");
+        }
+    } else {
+        js.push_str("render_all();\n");
+    }
     js
 }
 
@@ -340,6 +477,7 @@ struct RenderCtx {
     next_event: usize,
     loop_params: Vec<String>,
     component_stack: Vec<String>,
+    resume: bool,
 }
 
 fn render_view_expr(
@@ -368,7 +506,7 @@ fn render_node_template(
         ViewNode::Element(element) => {
             render_element_template(element, ctx, locals, states, program)
         }
-        ViewNode::Text(text) => render_text_template(&text.value, locals, states),
+        ViewNode::Text(text) => render_text_template("span", &text.value, "", locals, states),
         ViewNode::If(node) => {
             let then_html = render_view_expr(&node.then_block, ctx, locals, states, program);
             let else_html = node
@@ -420,13 +558,7 @@ fn render_element_template(
     }
     match element.name.as_str() {
         "Outlet" => "${render_route()}".into(),
-        "Text" => {
-            let expr = first_arg(element).cloned().unwrap_or(Expr {
-                raw: "\"\"".into(),
-                span: element.span,
-            });
-            render_text_template(&expr, locals, states)
-        }
+        "Text" => render_text_element_template(element, locals, states),
         "Button" => render_button_template(element, ctx, locals, states),
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
@@ -525,12 +657,50 @@ fn route_renderer_name(id: &str) -> String {
     format!("render_route_{}", id.replace('-', "_"))
 }
 
-fn render_text_template(expr: &Expr, locals: &HashSet<String>, states: &HashSet<String>) -> String {
+fn render_text_element_template(
+    element: &ElementNode,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let expr = first_arg(element).cloned().unwrap_or(Expr {
+        raw: "\"\"".into(),
+        span: element.span,
+    });
+    let tag = attr_value(element, "as")
+        .map(|expr| text_tag(expr.raw.trim_matches('"')))
+        .unwrap_or("span");
+    let class_attr = class_attr(element);
+    render_text_template(tag, &expr, &class_attr, locals, states)
+}
+
+fn render_text_template(
+    tag: &str,
+    expr: &Expr,
+    class_attr: &str,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
     let template = expr.raw.trim().trim_matches('"');
-    let mut html = String::from("<span>");
+    let mut html = format!("<{tag}{class_attr}>");
     html.push_str(&template_html(template, locals, states));
-    html.push_str("</span>");
+    html.push_str(&format!("</{tag}>"));
     html
+}
+
+fn text_tag(raw: &str) -> &'static str {
+    match raw {
+        "p" => "p",
+        "label" => "label",
+        "strong" => "strong",
+        "em" => "em",
+        "h1" => "h1",
+        "h2" => "h2",
+        "h3" => "h3",
+        "h4" => "h4",
+        "h5" => "h5",
+        "h6" => "h6",
+        _ => "span",
+    }
 }
 
 fn render_button_template(
@@ -546,7 +716,11 @@ fn render_button_template(
     let type_attr = attr_value(element, "type")
         .map(|e| format!(" type=\"{}\"", escape_template(e.raw.trim_matches('"'))))
         .unwrap_or_default();
-    format!("<button{}{}>{}</button>", event_attr, type_attr, label)
+    let class_attr = class_attr(element);
+    format!(
+        "<button{}{}{}>{}</button>",
+        class_attr, event_attr, type_attr, label
+    )
 }
 
 fn render_input_template(
@@ -1001,6 +1175,12 @@ fn event_attr_template(
     let event_id = ctx.next_event;
     ctx.next_event += 1;
     let mut attr = format!(" data-lume-event=\"{}:{}\"", event.event, event_id);
+    if ctx.resume {
+        attr.push_str(&format!(
+            " data-lume-on=\"{}:sym_event_{}\" data-lume-state=\"s0\"",
+            event.event, event_id
+        ));
+    }
     if !ctx.loop_params.is_empty() {
         let scope = ctx
             .loop_params
@@ -1020,12 +1200,12 @@ fn class_attr(element: &ElementNode) -> String {
     if let Some(class) = layout_class(&element.name) {
         classes.push(class.to_string());
     }
-    if element.attrs.iter().any(|attr| {
-        matches!(
-            attr.name.as_str(),
-            "gap" | "padding" | "margin" | "width" | "height" | "align" | "justify" | "columns"
-        )
-    }) {
+    if element.attrs.iter().any(|attr| is_style_attr(&attr.name))
+        || element.args.iter().any(|arg| match arg {
+            Arg::Named(name, _) => is_style_attr(name),
+            Arg::Positional(_) => false,
+        })
+    {
         classes.push(style_class_for(element));
     }
     if let Some(style) = attr_value(element, "style") {
@@ -1299,7 +1479,7 @@ fn render_name(node_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate;
+    use super::{generate, generate_with_options};
     use lume_codegen_html::generate as generate_html;
     use lume_hir::lower;
     use lume_ir::build;
@@ -1337,6 +1517,54 @@ component App {
     }
 
     #[test]
+    fn hydrate_activation_renders_on_startup_without_resume_warning() {
+        let source = r#"
+component App {
+  state count: i32 = 0
+
+  view {
+    Button("Add") {
+      on click {
+        count += 1
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate_with_options(&ir, &html, false, false);
+        assert!(js.contains("await restoreInitialState();\nrender_all();"));
+        assert!(!js.contains("warning[LUME1026]"));
+    }
+
+    #[test]
+    fn resume_runtime_reads_manifest_objects() {
+        let source = r#"
+component App {
+  state count: i32 = 0
+
+  view {
+    Button("Add") {
+      on click {
+        count += 1
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate_with_options(&ir, &html, false, true);
+        assert!(js.contains("manifest.serializedState?.s0"));
+        assert!(js.contains("resumableManifest.symbols?.[symbol]"));
+    }
+
+    #[test]
     fn generates_dynamic_if_and_for_renderer() {
         let source = r#"
 component App {
@@ -1368,6 +1596,44 @@ component App {
         assert!(js.contains("${state.count>0 ?"));
         assert!(js.contains("(state.items ?? []).map((item, $index) =>"));
         assert!(js.contains("Item ${escapeHtml(item)}"));
+    }
+
+    #[test]
+    fn substitutes_component_props_inside_dynamic_conditions() {
+        let source = r#"
+component Badge(tone: String, label: String) {
+  view {
+    if tone == "good" {
+      Text("Good {label}")
+    } else {
+      Text("Other {label}")
+    }
+  }
+}
+
+component App {
+  state count: i32 = 1
+
+  view {
+    Column {
+      Badge(tone="good", label="Ready")
+
+      if count > 0 {
+        Badge(tone="warn", label="Careful")
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("${(\"good\")==\"good\" ?"));
+        assert!(js.contains("${(\"warn\")==\"good\" ?"));
+        assert!(!js.contains("tone=="));
+        assert!(!js.contains("state.tone"));
     }
 
     #[test]

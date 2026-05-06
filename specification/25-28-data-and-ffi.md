@@ -1,5 +1,16 @@
 ## 25. データ取得
 
+この章は、UI から外部データやネイティブ実装へつながる経路をまとめる。`query`、Server Actions、フォーム、C / C++ FFI をここで整理する。
+
+```txt
+view
+  -> query / action
+  -> server / native bridge
+  -> cached result / re-render
+```
+
+フロントエンドの状態更新だけでなく、サーバー側の処理や既存資産の呼び出しをどう一つのモデルで扱うかに注目すると読みやすい。
+
 現行実装では `query` の client cache と `server action` からの簡易 invalidation は実装済みで、`mutation`、`stream`、`validation DSL` は [未実装] とみなす。
 
 ### 25.1 query

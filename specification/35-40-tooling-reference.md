@@ -1,163 +1,44 @@
-## 35. 標準モジュール
+## 36. CLI と設定
 
-Lume 標準機能は `lume/std/...` 名前空間で提供する。
-
-標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
-
-実装では `Text`、`Button`、`Input`、`Image`、`Form`、`Link`、`NavLink`、`Outlet`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Canvas`、`NativeCanvas` が主要な内蔵要素として扱われる。`GpuCanvas`、`TextArea`、`Modal`、`Dialog`、`Tabs`、`Table`、`Spacer`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`query`、`invalidate`、`t`、`locale` などは [未実装]。
-
-### 35.1 `lume/std/ui`
-
-基本 UI コンポーネント。
-
-```lume
-import { Text, Button, Input, Image, Form, Anchor, Canvas, NativeCanvas } from "lume/std/ui"
-```
-
-### 35.2 `lume/std/layout`
-
-レイアウトコンポーネント。
-
-```lume
-import { Box, Row, Column, Grid, Stack } from "lume/std/layout"
-```
-
-### 35.3 `lume/std/router`
-
-ルーター機能。
-
-```lume
-import {
-  Link,
-  NavLink,
-  Outlet,
-  navigate,
-  redirect,
-  notFound,
-  prefetchRoute
-} from "lume/std/router"
-```
-
-### 35.4 `lume/std/form`
-
-フォーム、validation、FormData binding。
-
-```lume
-import { Form, Field, FormData, validate } from "lume/std/form"
-```
-
-`Field` と `validate` は仕様上の目標であり、現行実装ではフォーム要素と Server Action 直結のみをサポートする。
-
-### 35.5 `lume/std/action`
-
-Server Action client stub と action result 型。
-
-```lume
-import { ActionResult, ActionError } from "lume/std/action"
-```
-
-`ActionResult` / `ActionError` は現在の runtime の JSON 形状に対応するための概念で、専用モジュールとしては [未実装]。
-
-### 35.6 `lume/std/query`
-
-client query と cache。
-
-```lume
-import { query, invalidate } from "lume/std/query"
-```
-
-`query` の cache 層は実装済みだが、`invalidate` の汎用 API はまだない。
-
-### 35.7 `lume/std/ffi`
-
-FFI 用型と補助定義。
-
-```lume
-import { Owned, Borrowed, View, Handle, Ptr, StatusCode, CanvasSurface } from "lume/std/ffi"
-```
-
-`CanvasSurface` は `NativeCanvas` renderer の第一引数として使う opaque borrowed handle である。保存、コピー、renderer 呼び出し外への escape は禁止する。
-
-### 35.8 `lume/std/gpu`
-
-GPU resource、shader、GPU graph、GpuCanvas。
-
-```lume
-import { GpuCanvas, gpu } from "lume/std/gpu"
-```
-
-`lume/std/gpu` は WebGPU を最初の実装 target とするが、標準モジュール自体は WebGPU API の薄い移植ではなく Lume GPU IR の公開 API とする。
-
-現行実装では [未実装]。
-
-### 35.9 `lume/std/a11y`
-
-アクセシビリティ補助。
-
-```lume
-import { VisuallyHidden, FocusTrap, Landmark } from "lume/std/a11y"
-```
-
-`VisuallyHidden`、`FocusTrap`、`Landmark` のコンポーネント群は [未実装]。
-
-### 35.10 `lume/std/asset`
-
-asset 参照。
-
-```lume
-import logo from "asset:./logo.svg"
-```
-
-asset import は Lume compiler が処理する。JavaScript bundler の import ではない。
-
-### 35.11 `lume/std/i18n`
-
-国際化。
-
-```lume
-import { t, locale } from "lume/std/i18n"
-```
-
-### 35.12 標準モジュール診断
+この章は、Lume の CLI、設定、Rust API、診断、整形をまとめた参照章である。標準モジュールは別章に分離した。
 
 ```txt
-LUME6101: unknown standard module
-LUME6102: standard module item is not exported
-LUME6103: standard module requires WASM target
-LUME6104: standard module requires native backend
-LUME6105: standard module cannot be used in client context
-LUME6106: asset import cannot be resolved
+CLI
+  -> config
+  -> resolver
+  -> formatter
+  -> diagnostics
 ```
+
+実装詳細よりも「どう使うか」に寄せて読めるよう、機能ごとに小さく分かれている。
 
 ---
 
-## 36. CLI
-
-### 32.1 build
+### 36.1 build
 
 ```bash
 lume build
 ```
 
-### 32.2 dev
+### 36.2 dev
 
 ```bash
 lume dev
 ```
 
-### 32.3 check
+### 36.3 check
 
 ```bash
 lume check
 ```
 
-### 32.4 format
+### 36.4 format
 
 ```bash
 lume fmt
 ```
 
-### 32.5 init
+### 36.5 init
 
 ```bash
 lume init

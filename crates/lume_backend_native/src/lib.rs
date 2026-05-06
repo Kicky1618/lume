@@ -514,7 +514,9 @@ fn platform_open(path: Option<&str>) -> Result<*mut c_void, String> {
                 .map_err(|_| "native library path contains an interior NUL byte".to_string())
         })
         .transpose()?;
-    let raw_path = path.as_ref().map_or(std::ptr::null(), |value| value.as_ptr());
+    let raw_path = path
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr());
     let handle = unsafe { dlopen(raw_path, RTLD_NOW) };
     if handle.is_null() {
         Err(platform_error())

@@ -14,8 +14,10 @@
   - コンパイルターゲット・DOM モデル・バックエンド実行モデル・最適化プロファイル
 - [33-34. 内部 IR と最適化](specification/33-34-optimization-internals.md)
   - 内部 IR・最適化・コード生成詳細
-- [35-40. 標準モジュールとツール](specification/35-40-tooling-reference.md)
-  - 標準モジュール・CLI・設定ファイル・Rust API・エラー診断・フォーマット規則
+- [35. 標準モジュール](specification/35-std-modules.md)
+  - `lume/std/...` 名前空間、標準コンポーネント、router / FFI / GPU 関連
+- [36-40. ツールと設定](specification/35-40-tooling-reference.md)
+  - CLI・設定ファイル・Rust API・エラー診断・フォーマット規則
 - [41-43. 構文と AST](specification/41-43-grammar-ast.md)
   - EBNF・AST・メモリモデル
 - [44-48. ポリシーと配布](specification/44-48-policy-packaging.md)

@@ -6,6 +6,19 @@ Lume は HTML / CSS / JavaScript を完全に隠すための言語ではない�
 
 JavaScript の上に記号を撒いただけの新言語ではない、という建前で進める。現実にはコンパイラがすべてを背負う。いつものことだ。
 
+この章では、Lume の設計思想と、以降の章を読むための前提をまとめる。
+
+```txt
+source
+  -> lexer
+  -> parser
+  -> HIR / IR
+  -> codegen
+  -> dist
+```
+
+まずは「何を作る言語か」を押さえ、そのあとにファイル形式、字句、キーワードを順に追うと全体像をつかみやすい。
+
 ---
 
 ## 1. 設計目標
@@ -436,7 +449,7 @@ import path は以下の順に解決する。
 
 ### 6.9 標準モジュール一覧
 
-Lume v0.1 は以下の標準モジュールを持つ。
+Lume v0.1 は以下の標準モジュールを持つ。詳細は [35. 標準モジュール](./35-std-modules.md) に分離している。
 
 ```txt
 lume/std/ui
@@ -448,97 +461,9 @@ lume/std/query
 lume/std/action
 lume/std/asset
 lume/std/i18n
-lume/std/time
-lume/std/result
 lume/std/ffi
 lume/std/gpu
 ```
-
-#### 6.9.1 lume/std/ui
-
-```txt
-Text
-Button
-Input
-TextArea
-Image
-Form
-Modal
-Dialog
-Tabs
-Table
-Anchor
-Canvas
-NativeCanvas
-```
-
-#### 6.9.2 lume/std/layout
-
-```txt
-Box
-Row
-Column
-Grid
-Stack
-Container
-Spacer
-```
-
-#### 6.9.3 lume/std/router
-
-```txt
-Router
-Route
-Link
-NavLink
-Outlet
-navigate
-redirect
-notFound
-useRoute
-useParams
-useSearchParams
-prefetchRoute
-```
-
-`useRoute` などはコンパイラ組み込みの router binding へ lowering される。JavaScript 関数として埋め込まれるわけではない。
-
-#### 6.9.4 lume/std/result
-
-```txt
-Result<T,E>
-Ok<T>
-Err<E>
-Option<T>
-Some<T>
-None
-```
-
-#### 6.9.5 lume/std/ffi
-
-```txt
-Owned<T>
-Borrowed<T>
-View<T>
-Handle<T>
-Ptr<T>
-ConstPtr<T>
-StatusCode
-CanvasSurface
-```
-
-#### 6.9.6 lume/std/gpu
-
-```txt
-GpuCanvas
-gpu
-gpu buffer
-gpu texture
-gpu shader
-gpu graph
-```
-
-`lume/std/gpu` は WebGPU API の直接移植ではなく、Lume GPU IR の公開 API として扱う。
 
 ---
 

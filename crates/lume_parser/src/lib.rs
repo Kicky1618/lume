@@ -774,13 +774,29 @@ impl Parser {
             let prop_start = self.current().span.start;
             if let Some(name) = self.ident_or_keyword() {
                 if self.eat_symbol(':') {
-                    let value = self.expr_atom();
+                    let value = self.expr_until(&["}"]);
                     properties.push(StyleProperty {
                         name,
                         value,
                         pseudo: None,
                         media: None,
                         span: Span::new(prop_start, self.previous().span.end),
+                    });
+                } else if matches!(name.as_str(), "hover" | "active" | "disabled")
+                    && self.is_identish()
+                    && self.peek_is_symbol(':')
+                {
+                    let pseudo = name;
+                    let nested_start = self.current().span.start;
+                    let name = self.ident_or_keyword()?;
+                    self.expect_symbol(':');
+                    let value = self.expr_until(&["}"]);
+                    properties.push(StyleProperty {
+                        name,
+                        value,
+                        pseudo: Some(pseudo),
+                        media: None,
+                        span: Span::new(nested_start, self.previous().span.end),
                     });
                 } else if self.check_symbol('{') {
                     let block_name = name;
@@ -789,7 +805,7 @@ impl Parser {
                         let nested_start = self.current().span.start;
                         if let Some(name) = self.ident_or_keyword() {
                             if self.eat_symbol(':') {
-                                let value = self.expr_atom();
+                                let value = self.expr_until(&["}"]);
                                 properties.push(StyleProperty {
                                     name,
                                     value,
@@ -811,7 +827,7 @@ impl Parser {
                         let nested_start = self.current().span.start;
                         if let Some(name) = self.ident_or_keyword() {
                             if self.eat_symbol(':') {
-                                let value = self.expr_atom();
+                                let value = self.expr_until(&["}"]);
                                 properties.push(StyleProperty {
                                     name,
                                     value,
@@ -1254,6 +1270,10 @@ impl Parser {
 
     fn peek_operator(&self, operator: &str) -> bool {
         matches!(&self.peek().kind, TokenKind::Operator(op) if op == operator)
+    }
+
+    fn peek_is_symbol(&self, symbol: char) -> bool {
+        matches!(self.peek().kind, TokenKind::Symbol(ch) if ch == symbol)
     }
 
     fn current(&self) -> &Token {

@@ -1,5 +1,5 @@
 use lume_ast::*;
-use lume_codegen_css::{layout_class, style_class_for, style_ref_class};
+use lume_codegen_css::{is_style_attr, layout_class, style_class_for, style_ref_class};
 use lume_ir::LumeProgram;
 use std::collections::HashMap;
 
@@ -8,6 +8,7 @@ pub struct HtmlOutput {
     pub html: String,
     pub bindings: Vec<Binding>,
     pub events: Vec<EventBinding>,
+    pub serialized_state_json: String,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +29,11 @@ pub struct EventBinding {
 }
 
 pub fn generate(program: &LumeProgram) -> HtmlOutput {
+    generate_with_resume(program, true)
+}
+
+pub fn generate_with_resume(program: &LumeProgram, resume: bool) -> HtmlOutput {
+    let serialized_state_json = serialized_state(program);
     let mut ctx = Ctx {
         next_node: 1,
         next_event: 0,
@@ -37,20 +43,25 @@ pub fn generate(program: &LumeProgram) -> HtmlOutput {
         locals: HashMap::new(),
         state: initial_state(program),
         component_stack: Vec::new(),
+        resume,
     };
     let body = program
         .view()
         .map(|view| render_view(view, &mut ctx, program))
         .unwrap_or_default();
+    let root_resume_attrs = if resume { " data-lume-r=\"b0\"" } else { "" };
     let html = format!(
-        "<!doctype html>\n<html lang=\"ja\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Lume App</title>\n    <link rel=\"stylesheet\" href=\"/assets/style.css\">\n    <script type=\"module\" src=\"/assets/app.js\"></script>\n  </head>\n  <body>\n    <div id=\"lume-root\" data-lume-component=\"{}\" data-lume-id=\"c0\">\n{}    </div>\n  </body>\n</html>\n",
+        "<!doctype html>\n<html lang=\"ja\">\n  <head>\n    <meta charset=\"utf-8\">\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n    <title>Lume App</title>\n    <link rel=\"stylesheet\" href=\"/assets/style.css\">\n    <script type=\"module\" src=\"/assets/app.js\"></script>\n  </head>\n  <body>\n    <div id=\"lume-root\" data-lume-component=\"{}\" data-lume-id=\"c0\"{}>\n{}    </div>\n    <script type=\"application/lume-state\" id=\"lume-state-s0\">\n{}\n    </script>\n  </body>\n</html>\n",
         escape_attr(&program.component.name),
-        indent(&body, 6)
+        root_resume_attrs,
+        indent(&body, 6),
+        serialized_state_json,
     );
     HtmlOutput {
         html,
         bindings: ctx.bindings,
         events: ctx.events,
+        serialized_state_json,
     }
 }
 
@@ -63,6 +74,7 @@ struct Ctx {
     locals: HashMap<String, Value>,
     state: HashMap<String, Value>,
     component_stack: Vec<String>,
+    resume: bool,
 }
 
 fn render_view(view: &ViewBlock, ctx: &mut Ctx, program: &LumeProgram) -> String {
@@ -152,22 +164,35 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         return render_component(component, element, ctx, program);
     }
     match element.name.as_str() {
-        "Text" => {
-            let expr = first_arg(element).cloned().unwrap_or(Expr {
-                raw: "\"\"".into(),
-                span: element.span,
-            });
-            render_text_expr(&expr, ctx)
-        }
+        "Text" => render_text_element(element, ctx),
         "Button" => render_button(element, ctx),
         "Input" => render_input(element, ctx),
+        "TextArea" => render_text_area(element, ctx),
         "Image" => render_image(element, ctx),
         "Canvas" => render_canvas(element, ctx),
         "NativeCanvas" => render_native_canvas(element, ctx),
         "GpuCanvas" => render_gpu_canvas(element, ctx),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
         "Form" => render_form(element, ctx, program),
-        "Row" | "Column" | "Box" | "Grid" | "Stack" => render_container(element, ctx, program),
+        "Outlet" => render_outlet(element, ctx),
+        "Router" => render_semantic_container(element, ctx, program, "div", "l-router", None),
+        "Route" => render_semantic_container(element, ctx, program, "div", "l-route", None),
+        "Modal" => render_dialog_like(element, ctx, program, true),
+        "Dialog" => render_dialog_like(element, ctx, program, false),
+        "Tabs" => {
+            render_semantic_container(element, ctx, program, "div", "l-tabs", Some("tablist"))
+        }
+        "Table" => render_semantic_container(element, ctx, program, "table", "l-table", None),
+        "Spacer" => render_spacer(element, ctx),
+        "Field" => render_field(element, ctx, program),
+        "VisuallyHidden" => render_visually_hidden(element, ctx, program),
+        "FocusTrap" => {
+            render_semantic_container(element, ctx, program, "div", "l-focus-trap", None)
+        }
+        "Landmark" => render_landmark(element, ctx, program),
+        "Row" | "Column" | "Box" | "Container" | "Grid" | "Stack" => {
+            render_container(element, ctx, program)
+        }
         _ => render_container(element, ctx, program),
     }
 }
@@ -385,6 +410,26 @@ fn render_component(
 }
 
 fn render_text_expr(expr: &Expr, ctx: &mut Ctx) -> String {
+    render_text_node("span", expr, &[], ctx)
+}
+
+fn render_text_element(element: &ElementNode, ctx: &mut Ctx) -> String {
+    let fallback = Expr {
+        raw: "\"\"".into(),
+        span: element.span,
+    };
+    let expr = first_arg(element).unwrap_or(&fallback);
+    let tag = attr_value(element, "as")
+        .map(|expr| text_tag(expr.raw.trim_matches('"')))
+        .unwrap_or("span");
+    let mut classes = style_classes(element);
+    if let Some(style) = attr_value(element, "style") {
+        classes.push(style_ref_class(style.raw.trim_matches('"')));
+    }
+    render_text_node(tag, expr, &classes, ctx)
+}
+
+fn render_text_node(tag: &str, expr: &Expr, classes: &[String], ctx: &mut Ctx) -> String {
     let id = node_id(ctx);
     let template = expr.raw.trim().trim_matches('"').to_string();
     let deps = interpolation_deps(&template);
@@ -395,12 +440,30 @@ fn render_text_expr(expr: &Expr, ctx: &mut Ctx) -> String {
             deps,
         });
     }
+    let class_attr = class_attr(classes);
     format!(
-        "<span data-lume-id=\"{}\"{}>{}</span>\n",
+        "<{tag} data-lume-id=\"{}\"{}{}>{}</{tag}>\n",
         id,
-        bind_attr(&template),
+        class_attr,
+        bind_attr(&template, ctx.resume),
         escape_html(&render_template_initial(&template, ctx))
     )
+}
+
+fn text_tag(raw: &str) -> &'static str {
+    match raw {
+        "p" => "p",
+        "label" => "label",
+        "strong" => "strong",
+        "em" => "em",
+        "h1" => "h1",
+        "h2" => "h2",
+        "h3" => "h3",
+        "h4" => "h4",
+        "h5" => "h5",
+        "h6" => "h6",
+        _ => "span",
+    }
 }
 
 fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
@@ -408,13 +471,19 @@ fn render_button(element: &ElementNode, ctx: &mut Ctx) -> String {
     let label = first_arg(element)
         .map(|e| render_template_initial(e.raw.trim().trim_matches('"'), ctx))
         .unwrap_or_default();
+    let mut classes = style_classes(element);
+    if let Some(style) = attr_value(element, "style") {
+        classes.push(style_ref_class(style.raw.trim_matches('"')));
+    }
+    let class_attr = class_attr(&classes);
     let event_attr = event_attr(element, ctx, &id);
     let type_attr = attr_value(element, "type")
         .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
         .unwrap_or_default();
     format!(
-        "<button data-lume-id=\"{}\"{}{}>{}</button>\n",
+        "<button data-lume-id=\"{}\"{}{}{}>{}</button>\n",
         id,
+        class_attr,
         event_attr,
         type_attr,
         escape_html(&label)
@@ -435,11 +504,44 @@ fn render_input(element: &ElementNode, ctx: &mut Ctx) -> String {
     let input_type = attr_value(element, "type")
         .map(|e| format!(" type=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
         .unwrap_or_default();
+    let aria = aria_label_attr(element, ctx);
+    let disabled = bool_attr(element, "disabled");
+    let required = bool_attr(element, "required");
     let event_attr = event_attr(element, ctx, &id);
-    format!(
-        "<input data-lume-id=\"{}\"{}{}{}{}{}>\n",
-        id, event_attr, value, placeholder, name, input_type
-    )
+    let input = format!(
+        "<input data-lume-id=\"{}\"{}{}{}{}{}{}{}{}>\n",
+        id, event_attr, value, placeholder, name, input_type, aria, disabled, required
+    );
+    wrap_with_label(element, ctx, input)
+}
+
+fn render_text_area(element: &ElementNode, ctx: &mut Ctx) -> String {
+    let id = node_id(ctx);
+    let value = attr_value(element, "value")
+        .map(|e| eval_expr(e, ctx).to_text())
+        .unwrap_or_default();
+    let placeholder = attr_value(element, "placeholder")
+        .map(|e| format!(" placeholder=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
+    let name = attr_value(element, "name")
+        .map(|e| format!(" name=\"{}\"", escape_attr(e.raw.trim_matches('"'))))
+        .unwrap_or_default();
+    let aria = aria_label_attr(element, ctx);
+    let disabled = bool_attr(element, "disabled");
+    let required = bool_attr(element, "required");
+    let event_attr = event_attr(element, ctx, &id);
+    let textarea = format!(
+        "<textarea data-lume-id=\"{}\"{}{}{}{}{}{}>{}</textarea>\n",
+        id,
+        event_attr,
+        placeholder,
+        name,
+        aria,
+        disabled,
+        required,
+        escape_html(&value)
+    );
+    wrap_with_label(element, ctx, textarea)
 }
 
 fn render_image(element: &ElementNode, ctx: &mut Ctx) -> String {
@@ -531,28 +633,159 @@ fn render_form(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> S
     )
 }
 
+fn render_outlet(_element: &ElementNode, ctx: &mut Ctx) -> String {
+    let id = node_id(ctx);
+    format!(
+        "<div data-lume-id=\"{}\" data-lume-outlet=\"true\"></div>\n",
+        id
+    )
+}
+
+fn render_dialog_like(
+    element: &ElementNode,
+    ctx: &mut Ctx,
+    program: &LumeProgram,
+    modal: bool,
+) -> String {
+    let id = node_id(ctx);
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_default();
+    let title = attr_value(element, "title")
+        .map(|expr| {
+            format!(
+                " aria-label=\"{}\"",
+                escape_attr(&eval_expr(expr, ctx).to_attr())
+            )
+        })
+        .unwrap_or_default();
+    let open = bool_attr(element, "open");
+    let modal_attr = if modal {
+        " data-lume-modal=\"true\" aria-modal=\"true\""
+    } else {
+        ""
+    };
+    let class = if modal { "l-modal" } else { "l-dialog" };
+    format!(
+        "<dialog class=\"{}\" data-lume-id=\"{}\"{}{}{}>\n{}</dialog>\n",
+        class,
+        id,
+        modal_attr,
+        title,
+        open,
+        indent(&children, 2)
+    )
+}
+
+fn render_semantic_container(
+    element: &ElementNode,
+    ctx: &mut Ctx,
+    program: &LumeProgram,
+    tag: &str,
+    base_class: &str,
+    role: Option<&str>,
+) -> String {
+    let id = node_id(ctx);
+    let mut classes = vec![base_class.to_string()];
+    classes.extend(style_classes(element));
+    if let Some(style) = attr_value(element, "style") {
+        classes.push(style_ref_class(style.raw.trim_matches('"')));
+    }
+    let role_attr = role
+        .map(|role| format!(" role=\"{}\"", escape_attr(role)))
+        .unwrap_or_default();
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_default();
+    format!(
+        "<{tag}{} data-lume-id=\"{}\"{}>\n{}</{tag}>\n",
+        class_attr(&classes),
+        id,
+        role_attr,
+        indent(&children, 2)
+    )
+}
+
+fn render_spacer(element: &ElementNode, ctx: &mut Ctx) -> String {
+    let id = node_id(ctx);
+    let mut classes = vec!["l-spacer".to_string()];
+    classes.extend(style_classes(element));
+    let aria_hidden = " aria-hidden=\"true\"";
+    format!(
+        "<div{} data-lume-id=\"{}\"{}></div>\n",
+        class_attr(&classes),
+        id,
+        aria_hidden
+    )
+}
+
+fn render_field(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    let id = node_id(ctx);
+    let label = attr_value(element, "label")
+        .map(|expr| {
+            format!(
+                "<label class=\"l-field-label\">{}</label>\n",
+                escape_html(&eval_expr(expr, ctx).to_text())
+            )
+        })
+        .unwrap_or_default();
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_default();
+    format!(
+        "<div class=\"l-field\" data-lume-id=\"{}\">\n{}{}</div>\n",
+        id,
+        indent(&label, 2),
+        indent(&children, 2)
+    )
+}
+
+fn render_visually_hidden(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    let id = node_id(ctx);
+    let children = element
+        .children
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_else(|| {
+            first_arg(element)
+                .map(|expr| {
+                    escape_html(&render_template_initial(
+                        expr.raw.trim().trim_matches('"'),
+                        ctx,
+                    ))
+                })
+                .unwrap_or_default()
+        });
+    format!(
+        "<span class=\"l-visually-hidden\" data-lume-id=\"{}\">{}</span>\n",
+        id, children
+    )
+}
+
+fn render_landmark(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
+    let tag = attr_value(element, "as")
+        .or_else(|| attr_value(element, "type"))
+        .map(|expr| landmark_tag(expr.raw.trim_matches('"')))
+        .unwrap_or("section");
+    render_semantic_container(element, ctx, program, tag, "l-landmark", None)
+}
+
 fn render_container(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
     let mut classes = Vec::new();
     if let Some(class) = layout_class(&element.name) {
         classes.push(class.to_string());
     }
-    if element.attrs.iter().any(|attr| {
-        matches!(
-            attr.name.as_str(),
-            "gap" | "padding" | "margin" | "width" | "height" | "align" | "justify" | "columns"
-        )
-    }) {
-        classes.push(style_class_for(element));
-    }
+    classes.extend(style_classes(element));
     if let Some(style) = attr_value(element, "style") {
         classes.push(style_ref_class(style.raw.trim_matches('"')));
     }
-    let class_attr = if classes.is_empty() {
-        String::new()
-    } else {
-        format!(" class=\"{}\"", classes.join(" "))
-    };
     let children = element
         .children
         .as_ref()
@@ -560,10 +793,83 @@ fn render_container(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram)
         .unwrap_or_default();
     format!(
         "<div{} data-lume-id=\"{}\">\n{}</div>\n",
-        class_attr,
+        class_attr(&classes),
         id,
         indent(&children, 2)
     )
+}
+
+fn wrap_with_label(element: &ElementNode, ctx: &Ctx, control: String) -> String {
+    let Some(label) = attr_value(element, "label") else {
+        return control;
+    };
+    format!(
+        "<label class=\"l-field-label\">{}\n{}</label>\n",
+        escape_html(&render_template_initial(
+            label.raw.trim().trim_matches('"'),
+            ctx
+        )),
+        indent(&control, 2)
+    )
+}
+
+fn aria_label_attr(element: &ElementNode, ctx: &Ctx) -> String {
+    attr_value(element, "aria-label")
+        .or_else(|| attr_value(element, "ariaLabel"))
+        .map(|expr| {
+            format!(
+                " aria-label=\"{}\"",
+                escape_attr(&render_template_initial(
+                    expr.raw.trim().trim_matches('"'),
+                    ctx
+                ))
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn bool_attr(element: &ElementNode, name: &str) -> String {
+    element
+        .attrs
+        .iter()
+        .find(|attr| attr.name == name)
+        .and_then(|attr| match attr.value.as_ref() {
+            Some(value) if matches!(value.raw.trim(), "false" | "\"false\"") => None,
+            _ => Some(format!(" {name}")),
+        })
+        .unwrap_or_default()
+}
+
+fn style_classes(element: &ElementNode) -> Vec<String> {
+    let has_style_attr = element.attrs.iter().any(|attr| is_style_attr(&attr.name))
+        || element.args.iter().any(|arg| match arg {
+            Arg::Named(name, _) => is_style_attr(name),
+            Arg::Positional(_) => false,
+        });
+    if has_style_attr {
+        vec![style_class_for(element)]
+    } else {
+        Vec::new()
+    }
+}
+
+fn class_attr(classes: &[String]) -> String {
+    if classes.is_empty() {
+        String::new()
+    } else {
+        format!(" class=\"{}\"", classes.join(" "))
+    }
+}
+
+fn landmark_tag(raw: &str) -> &'static str {
+    match raw {
+        "header" | "banner" => "header",
+        "nav" | "navigation" => "nav",
+        "main" => "main",
+        "aside" | "complementary" => "aside",
+        "footer" | "contentinfo" => "footer",
+        _ => "section",
+    }
 }
 
 fn find_event(view: &ViewBlock) -> Option<&EventNode> {
@@ -592,6 +898,13 @@ fn event_attr(element: &ElementNode, ctx: &mut Ctx, node_id: &str) -> String {
         escape_attr(&event.event),
         event_id
     );
+    if ctx.resume {
+        attr.push_str(&format!(
+            " data-lume-on=\"{}:sym_event_{}\" data-lume-state=\"s0\"",
+            escape_attr(&event.event),
+            event_id
+        ));
+    }
     if !ctx.loop_params.is_empty() {
         attr.push_str(&format!(
             " data-lume-scope=\"{}\"",
@@ -627,10 +940,17 @@ fn node_id(ctx: &mut Ctx) -> String {
     id
 }
 
-fn bind_attr(template: &str) -> String {
+fn bind_attr(template: &str, resume: bool) -> String {
     let deps = interpolation_deps(template);
     if deps.is_empty() {
         String::new()
+    } else if resume {
+        let scoped = deps
+            .iter()
+            .map(|dep| format!("s0.{dep}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(" data-lume-bind=\"{}\"", escape_attr(&scoped))
     } else {
         format!(" data-lume-bind=\"text:{}\"", escape_attr(&deps.join(",")))
     }
@@ -712,6 +1032,15 @@ fn initial_state(program: &LumeProgram) -> HashMap<String, Value> {
         .states()
         .map(|state| (state.name.clone(), parse_value(state.init.raw.trim())))
         .collect()
+}
+
+fn serialized_state(program: &LumeProgram) -> String {
+    let mut fields = Vec::new();
+    for state in program.states() {
+        let value = parse_value(state.init.raw.trim()).to_json();
+        fields.push(format!("\"{}\":{}", escape_json(&state.name), value));
+    }
+    format!("{{{}}}", fields.join(","))
 }
 
 fn eval_expr(expr: &Expr, ctx: &Ctx) -> Value {
@@ -884,7 +1213,7 @@ fn escape_attr(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::generate;
+    use super::{generate, generate_with_resume};
     use lume_hir::lower;
     use lume_ir::build;
     use lume_parser::parse;
@@ -899,7 +1228,8 @@ style card {
 component App {
   view {
     Box style=card {
-      Text("Hello")
+      Text("Hello", color=ink, weight=700)
+      Button("Save", style=card)
     }
   }
 }
@@ -908,6 +1238,9 @@ component App {
         assert!(!diagnostics.has_errors());
         let ir = build(&lower(program)).expect("ir");
         let html = generate(&ir);
+        assert!(html.html.contains("l-style-card"));
+        assert!(html.html.contains("class=\"l-s"));
+        assert!(html.html.contains("<button data-lume-id=\""));
         assert!(html.html.contains("l-style-card"));
     }
 
@@ -934,6 +1267,49 @@ component App {
         assert!(html.html.contains("Count: 7"));
         assert!(html.html.contains("value=\"Lume\""));
         assert!(html.html.contains("src=\"/avatars/Lume.png\" alt=\"Lume\""));
+    }
+
+    #[test]
+    fn omits_resume_markers_when_resume_is_disabled() {
+        let source = r#"
+component App {
+  state count: i32 = 0
+
+  view {
+    Button("Add") {
+      on click {
+        count += 1
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_with_resume(&ir, false);
+        assert!(!html.html.contains("data-lume-r=\"b0\""));
+        assert!(!html.html.contains("data-lume-on=\"click:sym_event_0\""));
+        assert!(html.html.contains("data-lume-event=\"click:0\""));
+    }
+
+    #[test]
+    fn emits_resumable_state_binding_marker() {
+        let source = r#"
+component App {
+  state count: i32 = 0
+
+  view {
+    Text("Count: {count}")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_with_resume(&ir, true);
+        assert!(html.html.contains("data-lume-bind=\"s0.count\""));
+        assert!(html.html.contains("id=\"lume-state-s0\""));
     }
 
     #[test]
@@ -1007,5 +1383,68 @@ component App {
         assert!(html.html.contains("data-lume-form-action=\"save\""));
         assert!(html.html.contains("name=\"message\""));
         assert!(html.html.contains("type=\"submit\""));
+    }
+
+    #[test]
+    fn renders_documented_standard_elements() {
+        let source = r#"
+component App {
+  state note: String = "Hello"
+
+  view {
+    Column {
+      Container {
+        Router {
+          Route {
+            Text("Routed")
+          }
+        }
+      }
+      Text("Title", as="h1", size=24, weight=700)
+      TextArea(value=note, label="Note")
+      Modal(title="Details", open) {
+        Dialog(title="Inner") {
+          VisuallyHidden("Hidden title")
+          Field(label="Name") {
+            Input(label="Name")
+          }
+        }
+      }
+      Tabs {
+        Button("First")
+      }
+      Table {
+        Text("Cell")
+      }
+      Spacer height=12
+      FocusTrap {
+        Button("Close")
+      }
+      Landmark(as="main") {
+        Outlet()
+      }
+    }
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate(&ir);
+        assert!(html.html.contains("<h1"));
+        assert!(html.html.contains("class=\"l-container\""));
+        assert!(html.html.contains("class=\"l-router\""));
+        assert!(html.html.contains("class=\"l-route\""));
+        assert!(html.html.contains("<textarea"));
+        assert!(html.html.contains("<dialog class=\"l-modal\""));
+        assert!(html.html.contains("<dialog class=\"l-dialog\""));
+        assert!(html.html.contains("class=\"l-visually-hidden\""));
+        assert!(html.html.contains("class=\"l-field\""));
+        assert!(html.html.contains("class=\"l-tabs\""));
+        assert!(html.html.contains("class=\"l-table\""));
+        assert!(html.html.contains("class=\"l-spacer"));
+        assert!(html.html.contains("class=\"l-focus-trap\""));
+        assert!(html.html.contains("<main class=\"l-landmark\""));
+        assert!(html.html.contains("data-lume-outlet=\"true\""));
     }
 }

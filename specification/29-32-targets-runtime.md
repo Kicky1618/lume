@@ -1,5 +1,16 @@
 ## 29. 低レベル拡張ポリシー
 
+この章は、Lume がどの実行形態を取るか、そしてどこまで低レベルへ降りるかを説明する。ターゲット選択と runtime の境界をここで決める。
+
+```txt
+source
+  -> target selection
+  -> DOM / JS / WASM / native
+  -> runtime execution
+```
+
+実装の細部よりも、「何を許可し、何を禁止するか」という境界線を見ると全体の設計意図がつかみやすい。
+
 Lume は JavaScript の直接埋め込みを許可しない。
 
 低レベル拡張は **C / C++ FFI** に限定する。
@@ -290,7 +301,7 @@ nodes.button.addEventListener("click", () => {
 
 ---
 
-### 31.4 WASM 出力 [未実装]
+### 31.4 WASM 出力 [一部実装]
 
 WASM ターゲットでは、状態遷移と差分計算を WASM に配置できる。
 
@@ -340,7 +351,7 @@ JavaScript は起動時に以下を行う。
 
 ---
 
-### 31.6 Resumable 起動モデル [未実装]
+### 31.6 Resumable 起動モデル [一部実装]
 
 Lume は通常の hydration に加えて、Qwik 風の **resumable** 起動モデルを持てる。
 

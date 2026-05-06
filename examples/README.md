@@ -22,3 +22,4 @@ Examples:
 - `server-actions-jit`: numeric `runtime "jit"` Server Action compiled through the LLVM backend when available.
 - `server-actions-metadata`: action modifiers such as `auth`, `csrf`, `invalidates`, `maxBodySize`, `rateLimit`, and `transaction` in the manifest.
 - `ffi-lab`: FFI modules, structs, enums, opaques, callbacks, ownership, `free`, `throws`, and native bridge planning in one operational console.
+- `mega-workbench`: a large stress example combining theme/style tokens, composed components, many states, actions, loops, conditionals, Server Actions, WASM-enabled numeric updates, and resumable output.

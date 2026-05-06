@@ -862,7 +862,58 @@ fn substitute_expr(expr: &Expr, props: &HashMap<String, Expr>) -> Expr {
             span: expr.span,
         };
     }
-    expr.clone()
+    Expr {
+        raw: substitute_expr_identifiers(raw, props),
+        span: expr.span,
+    }
+}
+
+fn substitute_expr_identifiers(raw: &str, props: &HashMap<String, Expr>) -> String {
+    let mut out = String::new();
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            out.push(ch);
+            let mut escaped = false;
+            for (_, inner) in chars.by_ref() {
+                out.push(inner);
+                if escaped {
+                    escaped = false;
+                } else if inner == '\\' {
+                    escaped = true;
+                } else if inner == quote {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if is_identifier_start(ch) {
+            let start = idx;
+            let mut end = idx + ch.len_utf8();
+            while let Some((next_idx, next)) = chars.peek().copied() {
+                if is_identifier_continue(next) {
+                    chars.next();
+                    end = next_idx + next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let ident = &raw[start..end];
+            if let Some(value) = props.get(ident) {
+                out.push('(');
+                out.push_str(value.raw.trim());
+                out.push(')');
+            } else {
+                out.push_str(ident);
+            }
+            continue;
+        }
+
+        out.push(ch);
+    }
+    out
 }
 
 fn substitute_template(raw: &str, props: &HashMap<String, Expr>) -> String {
@@ -898,6 +949,14 @@ fn substitute_template(raw: &str, props: &HashMap<String, Expr>) -> String {
 
 fn is_string_literal(raw: &str) -> bool {
     (raw.starts_with('"') && raw.ends_with('"')) || (raw.starts_with('\'') && raw.ends_with('\''))
+}
+
+fn is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_identifier_continue(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphanumeric()
 }
 
 #[cfg(test)]

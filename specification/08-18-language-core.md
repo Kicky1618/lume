@@ -1,5 +1,13 @@
 ## 8. 値とリテラル
 
+この章は、Lume の式と値の最小単位を扱う。文字列、数値、真偽値、配列、オブジェクト、補間、式評価の感覚をここでそろえる。
+
+```txt
+literal -> expr -> component props -> view rendering
+```
+
+後続の「component」「state」「view」は、この章で定義する値の振る舞いを前提に組み立てられる。
+
 ### 8.1 文字列
 
 ```lume
@@ -578,4 +586,3 @@ SearchBox {
 ```
 
 ---
-

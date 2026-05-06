@@ -19,6 +19,7 @@ lume_resolver = { path = "../lume_resolver" }
 lume_runtime_server = { path = "../lume_runtime_server" }
 lume_session = { path = "../lume_session" }
 lume_typeck = { path = "../lume_typeck" }
+lume_ast = { path = "../lume_ast" }
 
 [lib]
 path = "src/lib.rs"

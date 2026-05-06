@@ -1,5 +1,16 @@
 ## 19. スタイル
 
+この章では、Lume の見た目をどう組み立てるかを扱う。`style` と `theme` を軸に、CSS へ落とし込まれる前の意図を明示する。
+
+```txt
+theme tokens
+  -> style rules
+  -> component props
+  -> generated CSS
+```
+
+スタイルだけでなく、標準コンポーネント、アクセシビリティ、ルーティングまで含めて「UI を画面として成立させる層」をまとめて読むと分かりやすい。
+
 Lume style は CSS の完全互換サブセットではなく、CSS に lowering される宣言 DSL である。
 
 DSL には以下を含む。

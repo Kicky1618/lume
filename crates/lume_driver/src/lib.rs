@@ -60,14 +60,18 @@ pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
         if !diagnostics.has_errors() {
             match lume_ir::build_with_base(&hir, options.entry.parent()) {
                 Ok(ir) => {
-                    let html = lume_codegen_html::generate(&ir);
+                    let html = lume_codegen_html::generate_with_resume(
+                        &ir,
+                        options.activation.is_resume(),
+                    );
                     let css = lume_codegen_css::generate(&ir);
-                    let js = lume_codegen_js::generate_with_wasm(
+                    let js = lume_codegen_js::generate_with_options(
                         &ir,
                         &html,
                         options.target.wasm_enabled(),
+                        options.activation.is_resume(),
                     );
-                    write_dist(&options, &ir, &html.html, &css, &js)?;
+                    write_dist(&options, &ir, &html, &css, &js)?;
                     let mut emitted = vec![
                         options.out_dir.join("index.html").display().to_string(),
                         options.out_dir.join("assets/app.js").display().to_string(),
@@ -982,26 +986,32 @@ mod tests {
 fn write_dist(
     options: &BuildOptions,
     ir: &lume_ir::LumeProgram,
-    html: &str,
+    html: &lume_codegen_html::HtmlOutput,
     css: &str,
     js: &str,
 ) -> io::Result<()> {
     let assets = options.out_dir.join("assets");
     fs::create_dir_all(&assets)?;
     build_ffi_sources(options, ir)?;
-    fs::write(options.out_dir.join("index.html"), html)?;
+    fs::write(options.out_dir.join("index.html"), &html.html)?;
     fs::write(assets.join("style.css"), css)?;
     fs::write(assets.join("app.js"), js)?;
     if options.target.wasm_enabled() {
-        let wasm = match lume_codegen_wasm::WasmBackend::new().emit(ir) {
+        let wasm_events = html
+            .events
+            .iter()
+            .map(|event| lume_codegen_wasm::WasmEvent {
+                id: event.id,
+                statements: event.statements.clone(),
+            })
+            .collect::<Vec<_>>();
+        let wasm = match lume_codegen_wasm::WasmBackend::new().emit_with_events(ir, &wasm_events) {
             Ok(artifact) => artifact.wasm,
             Err(err) => {
                 eprintln!(
                     "lume build: LLVM WASM generation failed, using fallback skeleton: {err}"
                 );
-                lume_codegen_wasm::WasmBackend::new()
-                    .emit_skeleton()
-                    .to_vec()
+                lume_codegen_wasm::WasmBackend::new().emit_skeleton()
             }
         };
         fs::write(assets.join("app.wasm"), wasm)?;
@@ -1011,7 +1021,10 @@ fn write_dist(
             fs::remove_file(stale_wasm)?;
         }
     }
-    fs::write(assets.join("lume.manifest.json"), manifest(ir, options))?;
+    fs::write(
+        assets.join("lume.manifest.json"),
+        manifest(ir, html, options),
+    )?;
     fs::write(
         assets.join("lume.backend.json"),
         backend_manifest(ir, options),
@@ -1092,7 +1105,11 @@ fn c_compiler_for(language: Option<&str>) -> &'static str {
     }
 }
 
-fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
+fn manifest(
+    ir: &lume_ir::LumeProgram,
+    html: &lume_codegen_html::HtmlOutput,
+    options: &BuildOptions,
+) -> String {
     let states = ir
         .states()
         .map(|state| {
@@ -1205,6 +1222,70 @@ fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n");
+    let state_names = ir
+        .states()
+        .map(|state| state.name.clone())
+        .collect::<Vec<_>>();
+    let symbols = html
+        .events
+        .iter()
+        .map(|event| {
+            let captures = resumable_event_captures(event, &state_names)
+                .into_iter()
+                .map(|capture| format!("\"s0.{}\"", json_escape(&capture)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "    \"sym_event_{}\": {{ \"captures\": [{}], \"chunk\": null, \"boundary\": \"b0\" }}",
+                event.id,
+                captures
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let event_bindings = html
+        .events
+        .iter()
+        .map(|event| {
+            format!(
+                "      {{ \"node\": \"{}\", \"event\": \"{}\", \"symbol\": \"sym_event_{}\", \"state\": \"s0\" }}",
+                json_escape(&event.node_id),
+                json_escape(&event.event),
+                event.id
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let resume_graph_boundaries = if options.activation.is_resume() {
+        format!(
+            "      {{ \"id\": \"b0\", \"stateScopes\": [\"s0\"], \"symbols\": [{}], \"fallback\": \"HydrateBoundary\" }}",
+            html.events
+                .iter()
+                .map(|event| format!("\"sym_event_{}\"", event.id))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        String::new()
+    };
+    let symbols = if options.activation.is_resume() {
+        symbols
+    } else {
+        String::new()
+    };
+    let event_bindings = if options.activation.is_resume() {
+        event_bindings
+    } else {
+        String::new()
+    };
+    let serialized_state = if options.activation.is_resume() {
+        format!(
+            "    \"s0\": {{ \"value\": {}, \"hash\": null }}",
+            html.serialized_state_json
+        )
+    } else {
+        String::new()
+    };
     let ffi = ir
         .ffi_modules
         .iter()
@@ -1371,11 +1452,16 @@ fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"activation\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"resumeGraph\": {{\n    \"boundaries\": [\n{}\n    ]\n  }},\n  \"symbols\": {{\n{}\n  }},\n  \"eventBindings\": [\n{}\n  ],\n  \"serializedState\": {{\n{}\n  }},\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
         json_escape(&ir.component.name),
         options.target.as_str(),
+        options.activation.as_str(),
         backend_list(options),
         states,
+        resume_graph_boundaries,
+        symbols,
+        event_bindings,
+        serialized_state,
         routes,
         route_tree,
         styles,
@@ -1387,6 +1473,80 @@ fn manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
         ffi_enums,
         ffi_opaques
     )
+}
+
+fn resumable_event_captures(
+    event: &lume_codegen_html::EventBinding,
+    state_names: &[String],
+) -> Vec<String> {
+    let mut captures = Vec::new();
+    for stmt in &event.statements {
+        match stmt {
+            lume_ast::Stmt::Assign { target, expr, .. } => {
+                if state_names.iter().any(|state| state == target) {
+                    push_unique(&mut captures, target.clone());
+                }
+                for ident in identifiers_in_expr(&expr.raw) {
+                    if state_names.iter().any(|state| state == &ident) {
+                        push_unique(&mut captures, ident);
+                    }
+                }
+            }
+            lume_ast::Stmt::Expr(expr) => {
+                for ident in identifiers_in_expr(&expr.raw) {
+                    if state_names.iter().any(|state| state == &ident) {
+                        push_unique(&mut captures, ident);
+                    }
+                }
+            }
+        }
+    }
+    captures
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn identifiers_in_expr(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '\"' || ch == '\'' {
+            while let Some((_, inner)) = chars.next() {
+                if inner == '\\' {
+                    let _ = chars.next();
+                    continue;
+                }
+                if inner == ch {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '_' || ch.is_ascii_alphabetic() {
+            let start = idx;
+            let mut end = idx + ch.len_utf8();
+            while let Some((next_idx, next)) = chars.peek().copied() {
+                if next == '_' || next.is_ascii_alphanumeric() {
+                    let _ = chars.next();
+                    end = next_idx + next.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let ident = raw[start..end].to_string();
+            if !matches!(
+                ident.as_str(),
+                "true" | "false" | "null" | "undefined" | "Math" | "String" | "Number"
+            ) {
+                push_unique(&mut out, ident);
+            }
+        }
+    }
+    out
 }
 
 fn backend_manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String {
@@ -1433,7 +1593,7 @@ fn backend_manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String
             "null"
         },
         if options.target.wasm_enabled() {
-            "[\"lume_init\", \"lume_dispatch\", \"lume_get_patch_len\", \"lume_alloc\", \"lume_free\"]"
+            "[\"lume_init\", \"lume_dispatch\", \"lume_get_patch_len\", \"lume_alloc\", \"lume_free\", \"lume_set_state\", \"lume_get_state\"]"
         } else {
             "[]"
         },

@@ -1,0 +1,9 @@
+[book]
+title = "Lume UI Language Specification"
+authors = ["Lume contributors"]
+
+[build]
+build-dir = "../dist/docs"
+
+[output.html]
+additional-css = ["theme/extra.css"]
