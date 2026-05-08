@@ -14,6 +14,8 @@ pub struct ServerRuntime {
 pub struct ActionRequestContext {
     pub csrf_token: Option<String>,
     pub authenticated: bool,
+    pub roles: Vec<String>,
+    pub permissions: Vec<String>,
     pub rate_limit_exceeded: bool,
 }
 
@@ -22,6 +24,8 @@ impl Default for ActionRequestContext {
         Self {
             csrf_token: Some("dev-csrf-token".into()),
             authenticated: false,
+            roles: Vec::new(),
+            permissions: Vec::new(),
             rate_limit_exceeded: false,
         }
     }
@@ -335,13 +339,43 @@ fn enforce_action_guards(
     action: &ServerActionDecl,
     context: &ActionRequestContext,
 ) -> Result<(), ActionError> {
-    if modifier_value(action, "auth").is_some_and(|value| value != "optional")
-        && !context.authenticated
-    {
-        return Err(ActionError {
-            status: 401,
-            message: format!("Server Action `{}` requires auth", action.name),
-        });
+    if let Some(auth) = modifier_value(action, "auth") {
+        let requirement = parse_auth_requirement(&auth);
+        if requirement.kind != AuthKind::Optional && !context.authenticated {
+            return Err(ActionError {
+                status: 401,
+                message: format!("Server Action `{}` requires auth", action.name),
+            });
+        }
+        match requirement.kind {
+            AuthKind::Role => {
+                if !context.roles.iter().any(|role| role == &requirement.value) {
+                    return Err(ActionError {
+                        status: 403,
+                        message: format!(
+                            "Server Action `{}` requires role `{}`",
+                            action.name, requirement.value
+                        ),
+                    });
+                }
+            }
+            AuthKind::Can => {
+                if !context
+                    .permissions
+                    .iter()
+                    .any(|permission| permission == &requirement.value)
+                {
+                    return Err(ActionError {
+                        status: 403,
+                        message: format!(
+                            "Server Action `{}` requires permission `{}`",
+                            action.name, requirement.value
+                        ),
+                    });
+                }
+            }
+            AuthKind::Required | AuthKind::Optional => {}
+        }
     }
     if modifier_value(action, "csrf")
         .map(|value| value != "false")
@@ -362,15 +396,75 @@ fn enforce_action_guards(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthKind {
+    Required,
+    Optional,
+    Role,
+    Can,
+}
+
+#[derive(Clone, Debug)]
+struct AuthRequirement {
+    kind: AuthKind,
+    value: String,
+}
+
+fn parse_auth_requirement(value: &str) -> AuthRequirement {
+    let compact = value.split_whitespace().collect::<String>();
+    if compact == "optional" {
+        return AuthRequirement {
+            kind: AuthKind::Optional,
+            value: String::new(),
+        };
+    }
+    if let Some(value) = compact.strip_prefix("role=") {
+        return AuthRequirement {
+            kind: AuthKind::Role,
+            value: value.trim_matches(['"', '\'']).to_string(),
+        };
+    }
+    if let Some(value) = compact.strip_prefix("can=") {
+        return AuthRequirement {
+            kind: AuthKind::Can,
+            value: value.trim_matches(['"', '\'']).to_string(),
+        };
+    }
+    AuthRequirement {
+        kind: AuthKind::Required,
+        value: String::new(),
+    }
+}
+
 fn validate_action_rules(
     action: &ServerActionDecl,
     args: &[ActionValue],
 ) -> Result<(), ActionError> {
-    if !action
+    let Some(rules) = action
         .modifiers
         .iter()
-        .any(|modifier| modifier.name == "validate")
-    {
+        .find(|modifier| modifier.name == "validate")
+        .and_then(|modifier| modifier.value.as_deref())
+    else {
+        return Ok(());
+    };
+    let locals = action_locals(action, args);
+    let validation_rules = parse_validation_rules(rules);
+    if !validation_rules.is_empty() {
+        for rule in validation_rules {
+            let value = resolve_validation_field(&rule.field, &locals);
+            for check in rule.checks {
+                if !validation_check_passes(&check, value) {
+                    return Err(ActionError {
+                        status: 400,
+                        message: format!(
+                            "Server Action `{}` validation failed for `{}`",
+                            action.name, rule.field
+                        ),
+                    });
+                }
+            }
+        }
         return Ok(());
     }
     for (param, value) in action.params.iter().zip(args) {
@@ -387,6 +481,91 @@ fn validate_action_rules(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ValidationRule {
+    field: String,
+    checks: Vec<String>,
+}
+
+fn parse_validation_rules(raw: &str) -> Vec<ValidationRule> {
+    let tokens = raw.split_whitespace().collect::<Vec<_>>();
+    let mut rules = Vec::new();
+    let mut index = 0usize;
+    while index < tokens.len() {
+        let field = tokens[index].trim_end_matches(':');
+        if !field.contains('.') && !field.ends_with(':') {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        let mut checks = Vec::new();
+        while index < tokens.len() {
+            let token = tokens[index].trim_end_matches(':');
+            if token.contains('.') || tokens[index].ends_with(':') {
+                break;
+            }
+            checks.push(tokens[index].to_string());
+            index += 1;
+        }
+        if !checks.is_empty() {
+            rules.push(ValidationRule {
+                field: field.to_string(),
+                checks,
+            });
+        }
+    }
+    rules
+}
+
+fn resolve_validation_field<'a>(
+    field: &str,
+    locals: &'a HashMap<String, ActionValue>,
+) -> Option<&'a ActionValue> {
+    let mut parts = field.split('.');
+    let first = parts.next()?;
+    let mut current = locals.get(first)?;
+    for part in parts {
+        let ActionValue::Object(object) = current else {
+            return None;
+        };
+        current = object.get(part)?;
+    }
+    Some(current)
+}
+
+fn validation_check_passes(check: &str, value: Option<&ActionValue>) -> bool {
+    match check {
+        "required" => value.is_some_and(|value| {
+            !matches!(value, ActionValue::Null)
+                && !matches!(value, ActionValue::String(text) if text.trim().is_empty())
+        }),
+        "email" => value.is_some_and(|value| {
+            matches!(value, ActionValue::String(text) if text.contains('@') && text.contains('.'))
+        }),
+        other if other.starts_with("minLength(") => {
+            let Some(min) = numeric_rule_arg(other) else {
+                return false;
+            };
+            value.is_some_and(|value| matches!(value, ActionValue::String(text) if text.len() >= min))
+        }
+        other if other.starts_with("maxLength(") => {
+            let Some(max) = numeric_rule_arg(other) else {
+                return false;
+            };
+            value.is_some_and(|value| matches!(value, ActionValue::String(text) if text.len() <= max))
+        }
+        _ => true,
+    }
+}
+
+fn numeric_rule_arg(rule: &str) -> Option<usize> {
+    rule.split_once('(')?
+        .1
+        .trim_end_matches(')')
+        .parse::<usize>()
+        .ok()
 }
 
 fn action_revalidations(
@@ -1296,7 +1475,7 @@ fn escape_json(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionRuntime, ActionValue, ServerRuntime};
+    use super::{ActionRequestContext, ActionRuntime, ActionValue, ServerRuntime};
     use lume_hir::lower;
     use lume_ir::build;
     use lume_parser::parse;
@@ -1533,6 +1712,98 @@ component App {
             .call("publicEcho", vec![ActionValue::String("hello".into())])
             .expect("optional auth result");
         assert_eq!(result.value, ActionValue::String("hello".into()));
+    }
+
+    #[test]
+    fn enforces_auth_role_and_permission_requirements() {
+        let runtime = runtime_for(
+            r#"
+server action deleteUser(id: String): String auth role="admin" {
+  return id
+}
+
+server action updatePost(id: String): String auth can="post:update" {
+  return id
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let authenticated = ActionRequestContext {
+            authenticated: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .call_with_context(
+                    "deleteUser",
+                    vec![ActionValue::String("u1".into())],
+                    &authenticated
+                )
+                .expect_err("role error")
+                .status,
+            403
+        );
+        let admin = ActionRequestContext {
+            authenticated: true,
+            roles: vec!["admin".into()],
+            permissions: vec!["post:update".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .call_with_context("deleteUser", vec![ActionValue::String("u1".into())], &admin)
+                .expect("role result")
+                .value,
+            ActionValue::String("u1".into())
+        );
+        assert_eq!(
+            runtime
+                .call_with_context("updatePost", vec![ActionValue::String("p1".into())], &admin)
+                .expect("permission result")
+                .value,
+            ActionValue::String("p1".into())
+        );
+    }
+
+    #[test]
+    fn enforces_validation_dsl_rules() {
+        let runtime = runtime_for(
+            r#"
+server action createUser(input: Object): Object
+  validate {
+    input.email: required email
+    input.password: required minLength(8)
+  }
+{
+  return input
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let err = runtime
+            .call_json(
+                "createUser",
+                r#"{"args":[{"email":"bad","password":"short"}]}"#,
+            )
+            .expect_err("validation error");
+        assert_eq!(err.status, 400);
+        let body = runtime
+            .call_json(
+                "createUser",
+                r#"{"args":[{"email":"a@example.com","password":"long-enough"}]}"#,
+            )
+            .expect("valid input");
+        assert!(body.contains(r#""email":"a@example.com""#));
     }
 
     #[test]

@@ -24,14 +24,14 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 
 標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
 
-実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`query`、`storage`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
+実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`ImageCanvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`bytes`、`query`、`storage`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
 
 ### 35.1 `lume/std/ui`
 
 基本 UI コンポーネント。
 
 ```lume
-import { Text, Button, Input, TextArea, Image, Script, Form, Anchor, Canvas, NativeCanvas, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
+import { Text, Button, Input, TextArea, Image, Script, Form, Anchor, Canvas, ImageCanvas, NativeCanvas, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
 ```
 
 `Script` は外部 script 参照のみを扱う。
@@ -133,7 +133,20 @@ Server target
 
 `query` が fetch/cache の一時的な結果を扱うのに対して、`storage` はオフライン保存やサーバー永続化のような長期保存を対象とする。SQL 固有の join を前提にせず、key-value / document / collection 系のデータモデルを想定する。
 
-### 35.8 `lume/std/ffi`
+### 35.8 `lume/std/bytes`
+
+`Bytes` と `String` の境界を扱う標準補助。
+
+```lume
+import { bytes } from "lume/std/bytes"
+
+let digest = bytes.hex(await nativehash.hash(input))
+let text = bytes.utf8(payload)
+```
+
+`bytes.hex(value)` は `Bytes` / `Uint8Array` 相当の値を小文字 hex 文字列へ変換する。`bytes.utf8(value)` は UTF-8 として decode する。FFI の `Owned<Bytes>` を直接 UI に出すのではなく、digest、payload preview、protocol message などの用途に応じて明示的に `String` へ変換する。
+
+### 35.9 `lume/std/ffi`
 
 FFI 用型と補助定義。
 
@@ -143,7 +156,17 @@ import { Owned, Borrowed, View, Handle, Ptr, StatusCode, CanvasSurface } from "l
 
 `CanvasSurface` は `NativeCanvas` renderer の第一引数として使う opaque borrowed handle である。保存、コピー、renderer 呼び出し外への escape は禁止する。
 
-### 35.9 `lume/std/gpu`
+### 35.10 `lume/std/image`
+
+FFI や server action から返された RGBA image buffer を canvas surface に表示する補助。
+
+```lume
+import { ImageCanvas, RgbaImage } from "lume/std/image"
+```
+
+`ImageCanvas` の `renderer` は `Owned<Bytes>` として `width * height * 4` bytes の RGBA8 を返す関数を受け取る。`NativeCanvas` が native surface へ直接描画する renderer を表すのに対して、`ImageCanvas` は byte image を UI canvas に転送する renderer を明示する。
+
+### 35.11 `lume/std/gpu`
 
 GPU resource、shader、GPU graph、GpuCanvas。
 
@@ -155,7 +178,7 @@ import { GpuCanvas, gpu } from "lume/std/gpu"
 
 現行実装では `GpuCanvas` 要素を HTML 出力に反映する。GPU graph の実行 runtime は段階的に拡張する。
 
-### 35.10 `lume/std/a11y`
+### 35.12 `lume/std/a11y`
 
 アクセシビリティ補助。
 

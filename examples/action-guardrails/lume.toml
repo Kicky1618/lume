@@ -1,0 +1,4 @@
+[project]
+name = "action-guardrails"
+entry = "src/app.lume"
+out_dir = "dist"

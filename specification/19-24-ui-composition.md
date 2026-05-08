@@ -366,7 +366,26 @@ component MandelbrotView() {
 
 旧形式の `nativeModule`、`nativeSymbol`、`nativeArgs` は非推奨とする。`data-lume-native-*` 属性は runtime の内部表現であり、Lume ソース上の public API ではない。
 
-#### 22.7.2 GpuCanvas
+#### 22.7.2 ImageCanvas
+
+`ImageCanvas` は FFI / server renderer が返す RGBA8 byte image を canvas に表示する要素である。
+
+```lume
+ImageCanvas(
+  width=320,
+  height=96,
+  renderer=nativehash.hash_preview_rgba,
+  args={
+    width: 320,
+    height: 96,
+    input: sample
+  }
+)
+```
+
+`renderer` は `Owned<Bytes>` として `width * height * 4` bytes の RGBA8 buffer を返す。native surface を直接扱う必要がない preview、thumbnail、CPU image filter では `NativeCanvas` ではなく `ImageCanvas` を使う。digest や text payload のように canvas へ描画しない byte result は、`ImageCanvas` ではなく `lume/std/bytes` の `bytes.hex` / `bytes.utf8` で `String` に変換して表示する。
+
+#### 22.7.3 GpuCanvas
 
 `GpuCanvas` は `lume/std/gpu` の GPU graph を表示先 surface に接続するための要素である。
 
@@ -387,7 +406,7 @@ GpuCanvas(
 
 WebGPU が利用できない環境では `fallback` に従う。`fallback` が未指定で WebGPU が利用できない場合は、runtime error ではなく、コンパイル時または起動時診断を出す。
 
-#### 22.7.3 Canvas diagnostics
+#### 22.7.4 Canvas diagnostics
 
 ```txt
 LUME5201: Canvas cannot use nativeModule/nativeSymbol/nativeArgs

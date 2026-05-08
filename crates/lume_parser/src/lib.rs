@@ -100,13 +100,16 @@ impl Parser {
         }
         if self.eat_keyword("server") {
             if self.eat_keyword("query") {
-                return self.query_decl(true).map(Decl::Query);
+                return self.query_decl(true, false).map(Decl::Query);
             }
             self.expect_keyword("action");
             return self.server_action_decl().map(Decl::ServerAction);
         }
         if self.eat_keyword("query") {
-            return self.query_decl(false).map(Decl::Query);
+            return self.query_decl(false, false).map(Decl::Query);
+        }
+        if self.eat_keyword("mutation") {
+            return self.query_decl(false, true).map(Decl::Query);
         }
         if self.eat_keyword("form") {
             return Some(Decl::Form(self.reserved_named("form")));
@@ -289,8 +292,7 @@ impl Parser {
                 continue;
             };
             let value = if self.check_symbol('{') && block_server_modifier(&name) {
-                self.skip_balanced_block();
-                None
+                Some(self.collect_balanced_block_raw())
             } else if self.check_symbol('{') {
                 None
             } else {
@@ -315,7 +317,7 @@ impl Parser {
         })
     }
 
-    fn query_decl(&mut self, is_server: bool) -> Option<QueryDecl> {
+    fn query_decl(&mut self, is_server: bool, is_mutation: bool) -> Option<QueryDecl> {
         let start = self.previous().span.start;
         let name = self.ident_or_keyword()?;
         let key = if self.eat_keyword("key") {
@@ -328,6 +330,7 @@ impl Parser {
         let source = self.expr_until(&[
             "}",
             "query",
+            "mutation",
             "server",
             "component",
             "page",
@@ -341,6 +344,7 @@ impl Parser {
             key,
             source,
             is_server,
+            is_mutation,
             span: Span::new(start, self.previous().span.end),
         })
     }
@@ -371,6 +375,8 @@ impl Parser {
                 "language" => module.language = Some(self.string_or_raw_atom()),
                 "library" => module.library = Some(self.string_or_raw_atom()),
                 "header" => module.header = Some(self.string_or_raw_atom()),
+                "namespace" => module.namespace = Some(self.string_or_raw_atom()),
+                "abi" => module.abi = Some(self.string_or_raw_atom()),
                 "sources" => module.sources = self.string_list_or_atom(),
                 "runtime" => module.runtime = self.string_list_or_atom(),
                 "safe" => module.safety = Some("safe".into()),
@@ -380,6 +386,11 @@ impl Parser {
                 "fn" => {
                     if let Some(function) = self.ffi_function_decl(item_start) {
                         module.functions.push(function);
+                    }
+                }
+                "target" => {
+                    if let Some(target) = self.ffi_target_decl(item_start) {
+                        module.targets.push(target);
                     }
                 }
                 _ => {
@@ -436,6 +447,36 @@ impl Parser {
         })
     }
 
+    fn ffi_target_decl(&mut self, start: usize) -> Option<FfiTargetDecl> {
+        let name = self.ident_or_keyword()?;
+        self.expect_symbol('{');
+        let mut target = FfiTargetDecl {
+            name,
+            span: Span::new(start, start),
+            ..Default::default()
+        };
+        while !self.at_eof() && !self.eat_symbol('}') {
+            let Some(item) = self.ident_or_keyword() else {
+                self.advance();
+                continue;
+            };
+            match item.as_str() {
+                "library" => target.library = Some(self.string_or_raw_atom()),
+                "header" => target.header = Some(self.string_or_raw_atom()),
+                "sources" => target.sources = self.string_list_or_atom(),
+                _ => {
+                    if self.check_symbol('{') {
+                        self.skip_balanced_block();
+                    } else {
+                        self.advance();
+                    }
+                }
+            }
+        }
+        target.span = Span::new(start, self.previous().span.end);
+        Some(target)
+    }
+
     fn ffi_struct_decl(&mut self) -> Option<FfiStructDecl> {
         let start = self.previous().span.start;
         let name = self.ident_or_keyword()?;
@@ -458,6 +499,7 @@ impl Parser {
                 name,
                 ty: ty.trim().to_string(),
                 default: None,
+                modifier: None,
                 span: Span::new(field_start, self.previous().span.end),
             });
             self.eat_symbol(',');
@@ -526,12 +568,21 @@ impl Parser {
         self.expect_symbol('(');
         while !self.at_eof() && !self.eat_symbol(')') {
             let start = self.current().span.start;
+            let modifier = if self.eat_identish("out") {
+                Some("out".into())
+            } else {
+                None
+            };
             let Some(name) = self.ident_or_keyword() else {
                 break;
             };
             self.expect_symbol(':');
-            let ty = self.collect_raw_until(&["=", ",", ")"]);
-            let default = if self.eat_operator("=") {
+            let ty = if modifier.as_deref() == Some("out") {
+                self.collect_raw_until(&[",", ")"])
+            } else {
+                self.collect_raw_until(&["=", ",", ")"])
+            };
+            let default = if modifier.is_none() && self.eat_operator("=") {
                 Some(self.expr_until(&[",", ")"]))
             } else {
                 None
@@ -540,6 +591,7 @@ impl Parser {
                 name,
                 ty,
                 default,
+                modifier,
                 span: Span::new(start, self.previous().span.end),
             });
             self.eat_symbol(',');
@@ -1181,6 +1233,36 @@ impl Parser {
         }
     }
 
+    fn collect_balanced_block_raw(&mut self) -> String {
+        if !self.eat_symbol('{') {
+            return String::new();
+        }
+        let mut depth = 1usize;
+        let mut parts = Vec::new();
+        while !self.at_eof() && depth > 0 {
+            if self.check_symbol('{') {
+                depth += 1;
+                parts.push(token_text(self.current()));
+                self.advance();
+            } else if self.check_symbol('}') {
+                depth -= 1;
+                if depth > 0 {
+                    parts.push(token_text(self.current()));
+                }
+                self.advance();
+            } else {
+                parts.push(token_text(self.current()));
+                self.advance();
+            }
+        }
+        parts
+            .join(" ")
+            .replace(" . ", ".")
+            .replace(" : ", ": ")
+            .replace("( ", "(")
+            .replace(" )", ")")
+    }
+
     fn synchronize_top_level(&mut self) {
         while !self.at_eof() {
             if matches!(self.current().kind, TokenKind::Keyword(_)) {
@@ -1692,6 +1774,79 @@ component App {
         assert_eq!(module.functions[0].free.as_deref(), Some("bytes_free"));
         assert_eq!(module.functions[0].throws.as_deref(), Some("last_error"));
         assert!(module.functions[1].callback);
+    }
+
+    #[test]
+    fn parses_mutation_validation_cpp_abi_out_params_and_platform_targets() {
+        let source = r#"
+mutation saveUser = api.post("/users")
+
+server action createUser(input: CreateUserInput): User
+  validate {
+    input.email: required email
+    input.password: required minLength(8)
+  }
+{
+  return input
+}
+
+ffi module imagecodec {
+  language "cpp"
+  library "./native/libimagecodec.so"
+  header "./native/imagecodec.hpp"
+  namespace "imagecodec"
+  abi "cxx"
+
+  target linux-x64 {
+    library "./native/linux-x64/libimagecodec.so"
+  }
+
+  fn resize(input: Borrowed<Bytes>, width: i32, height: i32, out output: Owned<Bytes> free=image_free): StatusCode
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(
+            !diagnostics.has_errors(),
+            "unexpected diagnostics: {:?}",
+            diagnostics.as_slice()
+        );
+        let Decl::Query(mutation) = &program.declarations[0] else {
+            panic!("expected mutation");
+        };
+        assert!(mutation.is_mutation);
+
+        let Decl::ServerAction(action) = &program.declarations[1] else {
+            panic!("expected server action");
+        };
+        assert!(action
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.name == "validate"
+                && modifier
+                    .value
+                    .as_deref()
+                    .is_some_and(|value| value.contains("input.email"))));
+
+        let Decl::FfiModule(module) = &program.declarations[2] else {
+            panic!("expected ffi module");
+        };
+        assert_eq!(module.namespace.as_deref(), Some("imagecodec"));
+        assert_eq!(module.abi.as_deref(), Some("cxx"));
+        assert_eq!(module.targets[0].name, "linux-x64");
+        assert_eq!(
+            module.functions[0].params[3].modifier.as_deref(),
+            Some("out")
+        );
+        assert_eq!(
+            module.functions[0].params[3].ty,
+            "Owned<Bytes>free=image_free"
+        );
     }
 
     #[test]

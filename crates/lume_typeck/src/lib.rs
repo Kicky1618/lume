@@ -243,7 +243,7 @@ fn check_element(
     }
     if matches!(
         element.name.as_str(),
-        "Canvas" | "NativeCanvas" | "GpuCanvas"
+        "Canvas" | "ImageCanvas" | "NativeCanvas" | "GpuCanvas"
     ) {
         check_canvas(element, diagnostics);
     }
@@ -288,16 +288,19 @@ fn check_canvas(element: &ElementNode, diagnostics: &mut Diagnostics) {
     {
         diagnostics.push(Diagnostic::error(
             "LUME5201",
-            "Canvas cannot use nativeModule/nativeSymbol/nativeArgs; use NativeCanvas(renderer=..., args={...})",
+            "Canvas cannot use nativeModule/nativeSymbol/nativeArgs; use ImageCanvas(renderer=..., args={...}) or NativeCanvas(renderer=..., args={...})",
             Some(element.span),
         ));
     }
-    if element.name == "NativeCanvas" {
+    if matches!(element.name.as_str(), "ImageCanvas" | "NativeCanvas") {
         match attr_literal(element, "renderer") {
             Some(renderer) if renderer.contains('.') => {}
             _ => diagnostics.push(Diagnostic::error(
                 "LUME5202",
-                "NativeCanvas renderer must be a module function such as renderkit.mandelbrot_render",
+                format!(
+                    "{} renderer must be a module function such as renderkit.mandelbrot_render",
+                    element.name
+                ),
                 Some(element.span),
             )),
         }
@@ -306,7 +309,7 @@ fn check_canvas(element: &ElementNode, diagnostics: &mut Diagnostics) {
             if !(raw.starts_with('{') && raw.ends_with('}')) {
                 diagnostics.push(Diagnostic::error(
                     "LUME5203",
-                    "NativeCanvas args must be a structured object",
+                    format!("{} args must be a structured object", element.name),
                     Some(element.span),
                 ));
             }
@@ -820,6 +823,7 @@ fn standard_component_symbols() -> HashSet<String> {
         "NavLink",
         "Outlet",
         "Canvas",
+        "ImageCanvas",
         "NativeCanvas",
         "GpuCanvas",
         "Field",

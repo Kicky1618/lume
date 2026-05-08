@@ -14,7 +14,10 @@ pub struct FfiModule {
     pub language: String,
     pub library: Option<String>,
     pub header: Option<String>,
+    pub namespace: Option<String>,
+    pub abi: Option<String>,
     pub sources: Vec<String>,
+    pub targets: Vec<FfiTarget>,
     pub runtime: Vec<FfiRuntime>,
     pub safety: SafetyLevel,
     pub thread_safe: Option<bool>,
@@ -23,6 +26,14 @@ pub struct FfiModule {
     pub enums: Vec<FfiEnum>,
     pub opaques: Vec<FfiOpaque>,
     pub functions: Vec<FfiFunction>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FfiTarget {
+    pub name: String,
+    pub library: Option<String>,
+    pub header: Option<String>,
+    pub sources: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,6 +47,7 @@ pub struct FfiStruct {
 pub struct FfiField {
     pub name: String,
     pub ty: FfiType,
+    pub modifier: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -211,7 +223,10 @@ impl FfiModule {
             language: "c".into(),
             library: None,
             header: None,
+            namespace: None,
+            abi: None,
             sources: Vec::new(),
+            targets: Vec::new(),
             runtime: vec![FfiRuntime::Native],
             safety: SafetyLevel::Safe,
             thread_safe: None,
@@ -265,6 +280,33 @@ impl FfiModule {
                 Some(self.name.clone()),
             );
         }
+        if !matches!(
+            self.abi.as_deref(),
+            None | Some("c") | Some("C") | Some("cxx")
+        ) {
+            report.error(
+                "LUME2706",
+                format!(
+                    "ffi module `{}` uses unsupported abi `{}`",
+                    self.name,
+                    self.abi.as_deref().unwrap_or_default()
+                ),
+                Some(self.name.clone()),
+            );
+        }
+        if self.library.is_none()
+            && !self.targets.is_empty()
+            && self.library_for_current_platform().is_none()
+        {
+            report.error(
+                "LUME3010",
+                format!(
+                    "ffi module `{}` is missing a library for current platform",
+                    self.name
+                ),
+                Some(self.name.clone()),
+            );
+        }
         if self.thread_safe == Some(false) && self.lock.is_none() {
             report.warning(
                 "LUME2704",
@@ -307,6 +349,16 @@ impl FfiModule {
         for function in &self.functions {
             function.validate(&local_symbols, report);
         }
+    }
+}
+
+impl FfiModule {
+    pub fn library_for_current_platform(&self) -> Option<&str> {
+        self.targets
+            .iter()
+            .find(|target| target.name == current_platform())
+            .and_then(|target| target.library.as_deref())
+            .or(self.library.as_deref())
     }
 }
 
@@ -716,11 +768,24 @@ fn strip_type_modifiers(raw: &str) -> &str {
     raw[..end].trim()
 }
 
+pub fn current_platform() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("macos", "x86_64") => "darwin-x64",
+        ("macos", "aarch64") => "darwin-arm64",
+        ("windows", "x86_64") => "windows-x64",
+        ("windows", "aarch64") => "windows-arm64",
+        _ => "unknown",
+    }
+}
+
 #[cfg(feature = "ast")]
 pub mod ast {
     use super::*;
     use lume_ast::{
-        FfiEnumDecl, FfiFunctionDecl, FfiModuleDecl, FfiOpaqueDecl, FfiStructDecl, Param,
+        FfiEnumDecl, FfiFunctionDecl, FfiModuleDecl, FfiOpaqueDecl, FfiStructDecl, FfiTargetDecl,
+        Param,
     };
 
     impl FfiRegistry {
@@ -745,7 +810,10 @@ pub mod ast {
             module.language = decl.language.clone().unwrap_or_else(|| "c".into());
             module.library = decl.library.clone();
             module.header = decl.header.clone();
+            module.namespace = decl.namespace.clone();
+            module.abi = decl.abi.clone();
             module.sources = decl.sources.clone();
+            module.targets = decl.targets.iter().map(FfiTarget::from_ast).collect();
             module.runtime = if decl.runtime.is_empty() {
                 vec![FfiRuntime::Native]
             } else {
@@ -759,6 +827,17 @@ pub mod ast {
             module.lock = decl.lock.clone();
             module.functions = decl.functions.iter().map(FfiFunction::from_ast).collect();
             module
+        }
+    }
+
+    impl FfiTarget {
+        pub fn from_ast(decl: &FfiTargetDecl) -> Self {
+            Self {
+                name: decl.name.clone(),
+                library: decl.library.clone(),
+                header: decl.header.clone(),
+                sources: decl.sources.clone(),
+            }
         }
     }
 
@@ -816,6 +895,7 @@ pub mod ast {
         FfiField {
             name: param.name.clone(),
             ty: FfiType::parse(&param.ty),
+            modifier: param.modifier.clone(),
         }
     }
 
@@ -843,6 +923,7 @@ mod tests {
             params: vec![FfiField {
                 name: "input".into(),
                 ty: FfiType::Borrowed(Box::new(FfiType::Bytes)),
+                modifier: None,
             }],
             return_ty: FfiType::Owned(Box::new(FfiType::Bytes)),
             ownership: Ownership::Borrowed,
@@ -865,7 +946,10 @@ mod tests {
                 language: "c".into(),
                 library: Some("./libcodec.so".into()),
                 header: None,
+                namespace: None,
+                abi: None,
                 sources: Vec::new(),
+                targets: Vec::new(),
                 runtime: vec![FfiRuntime::Native],
                 safety: SafetyLevel::Safe,
                 thread_safe: Some(true),

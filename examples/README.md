@@ -19,7 +19,9 @@ Examples:
 - `composed-card`: local `.lume` import with exported component and style.
 - `routing-tree`: nested routes, `index`, `layout`, `guard`, `:id`, and `*path` in one route manifest.
 - `server-actions`: interpreted Server Actions, typed arguments, arrays, comparisons, and generated client stubs.
+- `action-guardrails`: `mutation`, `validation`, `auth role=`, and `auth can=` on one page.
 - `server-actions-jit`: numeric `runtime "jit"` Server Action compiled through the LLVM backend when available.
 - `server-actions-metadata`: action modifiers such as `auth`, `csrf`, `invalidates`, `maxBodySize`, `rateLimit`, and `transaction` in the manifest.
 - `ffi-lab`: FFI modules, structs, enums, opaques, callbacks, ownership, `free`, `throws`, and native bridge planning in one operational console.
+- `ffi-platform`: `language "cpp"`, `namespace`, `abi`, and platform-specific native library targets, wired to an `ImageCanvas` hash preview backed by native RGBA bytes.
 - `mega-workbench`: a large stress example combining theme/style tokens, composed components, many states, actions, loops, conditionals, Server Actions, WASM-enabled numeric updates, and resumable output.

@@ -11,7 +11,7 @@ view
 
 フロントエンドの状態更新だけでなく、サーバー側の処理や既存資産の呼び出しをどう一つのモデルで扱うかに注目すると読みやすい。
 
-現行実装では `query` の client cache、`server action` の `revalidate` 伝搬、streaming action の SSE 互換 transport は実装済みで、`mutation` と `validation DSL` は [未実装] とみなす。
+現行実装では `query` の client cache、`mutation` の client stub、`server action` の `revalidate` 伝搬、streaming action の SSE 互換 transport、validation DSL を扱う。
 
 ### 25.1 query
 
@@ -28,7 +28,7 @@ data: T?
 refetch(): Void
 ```
 
-### 25.2 mutation [未実装]
+### 25.2 mutation
 
 ```lume
 mutation saveUser = api.post("/users")
@@ -225,7 +225,7 @@ JavaScript が無効な環境でも、通常の POST として動作できるタ
 
 ---
 
-### 26.6 validation [未実装]
+### 26.6 validation
 
 Server Action には入力検証を指定できる。
 
@@ -326,7 +326,7 @@ server action updatePost(id: String, input: UpdatePostInput): Post
 }
 ```
 
-実装では `auth required` 相当の強制認証と、`auth optional` の緩和までは扱う。`role=`、`can=` の細かな権限分岐は [未実装]。
+実装では `auth required`、`auth optional`、`role=`、`can=` を扱う。dev server では role は `x-lume-role`、permission は `x-lume-can` header から読む。
 
 ---
 
@@ -663,11 +663,11 @@ server action compute(x: Float): Float
 }
 ```
 
-実装では `language`、`library`、`header`、`sources`、`runtime`、`safe` / `unsafe`、`threadSafe`、`lock`、`fn`、`free`、`throws`、`callback` を受ける。`namespace`、`abi`、`out` パラメータ構文は [未実装]。
+実装では `language`、`library`、`header`、`sources`、`runtime`、`safe` / `unsafe`、`threadSafe`、`lock`、`fn`、`free`、`throws`、`callback`、`namespace`、`abi`、`out` パラメータ構文を受ける。
 
 ---
 
-### 27.3 C++ module [未実装]
+### 27.3 C++ module
 
 ```lume
 ffi module imagecodec {
@@ -687,7 +687,7 @@ C++ ABI はコンパイラや標準ライブラリ差異の影響を受けやす
 
 ---
 
-### 27.4 C ABI 推奨形式 [未実装]
+### 27.4 C ABI 推奨形式
 
 ```cpp
 extern "C" {
@@ -767,7 +767,7 @@ File     -> Bytes / Stream<Bytes>
 
 `Int` を FFI 境界で使う場合は警告する。
 
-実装では `Ptr<T>`、`ConstPtr<T>`、`Borrowed<T>`、`Owned<T>`、`View<T>`、`Handle<T>`、`Struct<T>`、`Opaque<T>`、`cstring`、`Utf8String`、`Utf16String`、`Bytes` を扱う。`namespace` 付き C++ ABI やプラットフォーム別条件分岐は [未実装]。
+実装では `Ptr<T>`、`ConstPtr<T>`、`Borrowed<T>`、`Owned<T>`、`View<T>`、`Handle<T>`、`Struct<T>`、`Opaque<T>`、`cstring`、`Utf8String`、`Utf16String`、`Bytes`、`namespace` 付き C++ ABI、プラットフォーム別条件分岐を扱う。
 
 ```lume
 fn add(a: Int, b: Int): Int // warning: use i32 or i64 at FFI boundary
@@ -834,6 +834,37 @@ typedef struct {
 ```lume
 fn compress(input: Borrowed<Bytes>): Owned<Bytes> free=free_bytes
 ```
+
+FFI から返る `Bytes` を UI の文字列として表示する場合は、`lume/std/bytes` の変換を使う。
+
+```lume
+import { bytes } from "lume/std/bytes"
+
+ffi module nativehash {
+  fn hash(input: Borrowed<Bytes>): Owned<Bytes> free=bytes_free
+  fn bytes_free(bytes: Ptr<u8>): Void
+}
+
+component HashLabel {
+  state input: String = "lume"
+  state digest: String = ""
+
+  async action refreshDigest {
+    digest = bytes.hex(await nativehash.hash(input))
+  }
+
+  view {
+    Button("Hash") {
+      on click {
+        refreshDigest()
+      }
+    }
+    Text("Digest: {digest}")
+  }
+}
+```
+
+`bytes.hex` は binary digest や opaque payload preview に使う。native 側が UTF-8 text を返す場合は `bytes.utf8` で明示的に decode する。暗黙変換は行わない。
 
 ---
 
@@ -1147,7 +1178,7 @@ ffi module codec {
 
 ---
 
-### 27.21 platform 条件 [未実装]
+### 27.21 platform 条件
 
 ```lume
 ffi module nativehash {

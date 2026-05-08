@@ -171,6 +171,7 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "Image" => render_image(element, ctx),
         "Script" => render_script(element),
         "Canvas" => render_canvas(element, ctx),
+        "ImageCanvas" => render_image_canvas(element, ctx),
         "NativeCanvas" => render_native_canvas(element, ctx),
         "GpuCanvas" => render_gpu_canvas(element, ctx),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
@@ -200,6 +201,10 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
 
 fn render_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
     render_canvas_surface(element, ctx, String::new())
+}
+
+fn render_image_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
+    render_canvas_surface(element, ctx, native_image_canvas_attrs(element, ctx))
 }
 
 fn render_native_canvas(element: &ElementNode, ctx: &mut Ctx) -> String {
@@ -240,6 +245,14 @@ fn render_canvas_surface(element: &ElementNode, ctx: &mut Ctx, native_attrs: Str
 }
 
 fn native_canvas_attrs(element: &ElementNode, ctx: &Ctx) -> String {
+    native_renderer_attrs(element, ctx, "native")
+}
+
+fn native_image_canvas_attrs(element: &ElementNode, ctx: &Ctx) -> String {
+    native_renderer_attrs(element, ctx, "native-image")
+}
+
+fn native_renderer_attrs(element: &ElementNode, ctx: &Ctx, kind: &str) -> String {
     let Some(renderer) =
         attr_value(element, "renderer").and_then(|expr| native_renderer(expr.raw.trim()))
     else {
@@ -265,9 +278,12 @@ fn native_canvas_attrs(element: &ElementNode, ctx: &Ctx) -> String {
         .collect::<Vec<_>>()
         .join("");
     format!(
-        " data-lume-native-module=\"{}\" data-lume-native-symbol=\"{}\" data-lume-native-args=\"{}\"{}",
+        " data-lume-{}-module=\"{}\" data-lume-{}-symbol=\"{}\" data-lume-{}-args=\"{}\"{}",
+        kind,
         escape_attr(&renderer.0),
+        kind,
         escape_attr(&renderer.1),
+        kind,
         escape_attr(&arg_names),
         arg_attrs
     )

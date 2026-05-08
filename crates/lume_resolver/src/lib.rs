@@ -208,6 +208,7 @@ fn standard_component_symbols() -> HashSet<String> {
         "NavLink",
         "Outlet",
         "Canvas",
+        "ImageCanvas",
         "NativeCanvas",
         "GpuCanvas",
         "Field",
@@ -236,6 +237,7 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "Form",
             "Anchor",
             "Canvas",
+            "ImageCanvas",
             "NativeCanvas",
             "Modal",
             "Dialog",
@@ -273,6 +275,7 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "useAction",
         ]),
         "lume/std/query" => Some(&["query", "invalidate"]),
+        "lume/std/bytes" => Some(&["bytes"]),
         "lume/std/ffi" => Some(&[
             "Owned",
             "Borrowed",
@@ -282,6 +285,7 @@ fn standard_exports(module: &str) -> Option<&'static [&'static str]> {
             "StatusCode",
             "CanvasSurface",
         ]),
+        "lume/std/image" => Some(&["ImageCanvas", "RgbaImage"]),
         "lume/std/gpu" => Some(&["GpuCanvas", "gpu"]),
         "lume/std/a11y" => Some(&["VisuallyHidden", "FocusTrap", "Landmark"]),
         "lume/std/i18n" => Some(&["t", "locale"]),
@@ -301,6 +305,8 @@ mod tests {
         let source = r#"
 import { Text, Button, TextArea, Modal, Dialog, Tabs, Table, Spacer } from "lume/std/ui"
 import { Container } from "lume/std/layout"
+import { bytes } from "lume/std/bytes"
+import { ImageCanvas, RgbaImage } from "lume/std/image"
 import { Router, Route } from "lume/std/router"
 import { ActionController, ActionResult, callAction, useAction } from "lume/std/action"
 

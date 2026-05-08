@@ -14,12 +14,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 #[derive(Clone, Debug)]
 pub struct BuildResult {
     pub diagnostics: Vec<Diagnostic>,
     pub emitted: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BenchMetric {
+    pub name: &'static str,
+    pub duration: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct BenchResult {
+    pub diagnostics: Vec<Diagnostic>,
+    pub elapsed: Duration,
+    pub metrics: Vec<BenchMetric>,
+    pub emitted_files: usize,
+    pub bundle_bytes: u64,
+}
+
+struct BuildExecution {
+    diagnostics: Vec<Diagnostic>,
+    emitted: Vec<String>,
+    metrics: Vec<BenchMetric>,
 }
 
 #[repr(C)]
@@ -36,6 +57,7 @@ enum NativeScalarValue {
     U64(u64),
     F64(f64),
     Bool(bool),
+    Bytes(Vec<u8>),
 }
 
 #[derive(Debug)]
@@ -46,32 +68,99 @@ struct NativeBridgeRuntime {
 }
 
 pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
+    let execution = build_execution(options, false)?;
+    Ok(BuildResult {
+        diagnostics: execution.diagnostics,
+        emitted: execution.emitted,
+    })
+}
+
+pub fn bench(options: BuildOptions) -> io::Result<BenchResult> {
+    let bench_out_dir = temporary_bench_out_dir();
+    let mut bench_options = options.clone();
+    bench_options.out_dir = bench_out_dir.clone();
+
+    let started = Instant::now();
+    let execution = build_execution(bench_options, true)?;
+    let elapsed = started.elapsed();
+    let bundle_bytes = execution.emitted.iter().try_fold(0u64, |total, path| {
+        fs::metadata(path).map(|metadata| total + metadata.len())
+    })?;
+    let _ = fs::remove_dir_all(&bench_out_dir);
+
+    Ok(BenchResult {
+        diagnostics: execution.diagnostics,
+        elapsed,
+        metrics: execution.metrics,
+        emitted_files: execution.emitted.len(),
+        bundle_bytes,
+    })
+}
+
+fn build_execution(options: BuildOptions, record_metrics: bool) -> io::Result<BuildExecution> {
     let mut session = Session::default();
+    let mut metrics = Vec::new();
+
+    let load_started = Instant::now();
     let file = session.load_source(&options.entry)?;
+    push_bench_metric(&mut metrics, record_metrics, "source load", load_started);
+
+    let parse_started = Instant::now();
     let (program, mut diagnostics) = lume_parser::parse(&file.source);
+    push_bench_metric(&mut metrics, record_metrics, "parse", parse_started);
     if !diagnostics.has_errors() {
+        let lower_started = Instant::now();
         let hir = lume_hir::lower(program);
+        push_bench_metric(&mut metrics, record_metrics, "lower", lower_started);
+
+        let resolve_started = Instant::now();
         diagnostics
             .extend(lume_resolver::resolve_with_base(&hir, options.entry.parent()).into_vec());
         let component_symbols =
             lume_resolver::component_symbols_with_base(&hir, options.entry.parent());
+        push_bench_metric(&mut metrics, record_metrics, "resolve", resolve_started);
+
+        let typecheck_started = Instant::now();
         diagnostics
             .extend(lume_typeck::check_with_known_components(&hir, &component_symbols).into_vec());
+        push_bench_metric(&mut metrics, record_metrics, "typecheck", typecheck_started);
+
         if !diagnostics.has_errors() {
+            let ir_started = Instant::now();
             match lume_ir::build_with_base(&hir, options.entry.parent()) {
                 Ok(ir) => {
+                    push_bench_metric(&mut metrics, record_metrics, "IR generation", ir_started);
+
+                    let html_started = Instant::now();
                     let html = lume_codegen_html::generate_with_resume(
                         &ir,
                         options.activation.is_resume(),
                     );
+                    push_bench_metric(&mut metrics, record_metrics, "HTML emit", html_started);
+
+                    let css_started = Instant::now();
                     let css = lume_codegen_css::generate(&ir);
+                    push_bench_metric(&mut metrics, record_metrics, "CSS emit", css_started);
+
+                    let js_started = Instant::now();
                     let js = lume_codegen_js::generate_with_options(
                         &ir,
                         &html,
                         options.target.wasm_enabled(),
                         options.activation.is_resume(),
                     );
-                    write_dist(&options, &ir, &html, &css, &js)?;
+                    push_bench_metric(&mut metrics, record_metrics, "JS emit", js_started);
+
+                    write_dist(
+                        &options,
+                        &ir,
+                        &html,
+                        &css,
+                        &js,
+                        record_metrics,
+                        &mut metrics,
+                    )?;
+
                     let mut emitted = vec![
                         options.out_dir.join("index.html").display().to_string(),
                         options.out_dir.join("assets/app.js").display().to_string(),
@@ -100,19 +189,26 @@ pub fn build(options: BuildOptions) -> io::Result<BuildResult> {
                                 .to_string(),
                         );
                     }
-                    return Ok(BuildResult {
+                    if diagnostics.has_errors() {
+                        eprint!("{}", emit(diagnostics.as_slice(), Some(&file)));
+                    }
+                    return Ok(BuildExecution {
                         diagnostics: diagnostics.into_vec(),
                         emitted,
+                        metrics,
                     });
                 }
                 Err(more) => diagnostics.extend(more.into_vec()),
             }
         }
     }
-    eprint!("{}", emit(diagnostics.as_slice(), Some(&file)));
-    Ok(BuildResult {
+    if diagnostics.has_errors() {
+        eprint!("{}", emit(diagnostics.as_slice(), Some(&file)));
+    }
+    Ok(BuildExecution {
         diagnostics: diagnostics.into_vec(),
         emitted: Vec::new(),
+        metrics,
     })
 }
 
@@ -166,6 +262,28 @@ pub fn init() -> io::Result<()> {
         fs::write("src/app.lume", "component App {\n  state count: i32 = 0\n\n  view {\n    Column gap=12 padding=16 {\n      Text(\"Count: {count}\")\n\n      Button(\"増やす\") {\n        on click {\n          count += 1\n        }\n      }\n    }\n  }\n}\n")?;
     }
     Ok(())
+}
+
+fn temporary_bench_out_dir() -> PathBuf {
+    let stamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    std::env::temp_dir().join(format!("lume-bench-{}-{}", std::process::id(), stamp))
+}
+
+fn push_bench_metric(
+    metrics: &mut Vec<BenchMetric>,
+    enabled: bool,
+    name: &'static str,
+    started: Instant,
+) {
+    if enabled {
+        metrics.push(BenchMetric {
+            name,
+            duration: started.elapsed(),
+        });
+    }
 }
 
 pub fn dev(options: BuildOptions, port: u16) -> io::Result<()> {
@@ -446,6 +564,8 @@ fn handle_action_request(
         authenticated: request_header(headers, "authorization").is_some()
             || request_header(headers, "cookie")
                 .is_some_and(|cookie| cookie.contains("lume_session=")),
+        roles: comma_header_values(headers, "x-lume-role"),
+        permissions: comma_header_values(headers, "x-lume-can"),
         rate_limit_exceeded: action_rate_limited(action_id, headers),
     };
     let body = std::str::from_utf8(body).map_err(|err| {
@@ -560,7 +680,7 @@ fn native_bridge_runtime(options: &BuildOptions) -> io::Result<NativeBridgeRunti
         &ir.ffi_enums,
         &ir.ffi_opaques,
     );
-    let plan = NativeBackend.plan_ffi(&ffi_registry).map_err(|errors| {
+    let mut plan = NativeBackend.plan_ffi(&ffi_registry).map_err(|errors| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -569,6 +689,7 @@ fn native_bridge_runtime(options: &BuildOptions) -> io::Result<NativeBridgeRunti
             ),
         )
     })?;
+    absolutize_native_libraries(&mut plan, &project_root_for_entry(&options.entry));
     let resolver = DynamicLibraryResolver::default();
     let resolved = plan.resolve(&resolver).map_err(|errors| {
         io::Error::new(
@@ -588,6 +709,18 @@ fn native_bridge_runtime(options: &BuildOptions) -> io::Result<NativeBridgeRunti
         resolved,
         _resolver: resolver,
     })
+}
+
+fn absolutize_native_libraries(plan: &mut NativeBridgePlan, project_root: &Path) {
+    for module in &mut plan.modules {
+        if let Some(library) = module.library.as_deref() {
+            module.library = Some(
+                resolve_project_path(project_root, library)
+                    .display()
+                    .to_string(),
+            );
+        }
+    }
 }
 
 impl NativeBridgeRuntime {
@@ -677,6 +810,7 @@ fn parse_native_arg(ty: &NativeAbiType, raw: &str) -> Result<NativeScalarValue, 
             },
             other => Err(format!("native scalar type `{other}` is not supported yet")),
         },
+        NativeAbiType::Buffer => Ok(NativeScalarValue::Bytes(raw.as_bytes().to_vec())),
         NativeAbiType::Enum { repr, .. } => {
             parse_native_arg(&NativeAbiType::Scalar(repr.clone()), raw)
         }
@@ -692,6 +826,64 @@ fn call_native_buffer(
     values: &[NativeScalarValue],
 ) -> Result<NativeBytes, String> {
     match (params, values) {
+        ([NativeAbiType::Buffer], [NativeScalarValue::Bytes(input)]) => {
+            let function: unsafe extern "C" fn(*const u8, usize, *mut NativeBytes) -> c_int =
+                unsafe { std::mem::transmute(address) };
+            let mut out = NativeBytes {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            };
+            let status = unsafe {
+                function(
+                    if input.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        input.as_ptr()
+                    },
+                    input.len(),
+                    &mut out,
+                )
+            };
+            if status != 0 {
+                Err(format!("native call returned status {status}"))
+            } else {
+                Ok(out)
+            }
+        }
+        (
+            [NativeAbiType::Scalar(a), NativeAbiType::Scalar(b), NativeAbiType::Buffer],
+            [NativeScalarValue::I32(width), NativeScalarValue::I32(height), NativeScalarValue::Bytes(input)],
+        ) if a == "i32" && b == "i32" => {
+            let function: unsafe extern "C" fn(
+                i32,
+                i32,
+                *const u8,
+                usize,
+                *mut NativeBytes,
+            ) -> c_int = unsafe { std::mem::transmute(address) };
+            let mut out = NativeBytes {
+                ptr: std::ptr::null_mut(),
+                len: 0,
+            };
+            let status = unsafe {
+                function(
+                    *width,
+                    *height,
+                    if input.is_empty() {
+                        std::ptr::null()
+                    } else {
+                        input.as_ptr()
+                    },
+                    input.len(),
+                    &mut out,
+                )
+            };
+            if status != 0 {
+                Err(format!("native call returned status {status}"))
+            } else {
+                Ok(out)
+            }
+        }
         (
             [NativeAbiType::Scalar(a), NativeAbiType::Scalar(b), NativeAbiType::Scalar(c), NativeAbiType::Scalar(d), NativeAbiType::Scalar(e), NativeAbiType::Scalar(f)],
             [NativeScalarValue::I32(a_value), NativeScalarValue::I32(b_value), NativeScalarValue::I32(c_value), NativeScalarValue::F64(d_value), NativeScalarValue::F64(e_value), NativeScalarValue::F64(f_value)],
@@ -819,6 +1011,19 @@ fn request_header(headers: &[(String, String)], name: &str) -> Option<String> {
     headers
         .iter()
         .find_map(|(header, value)| header.eq_ignore_ascii_case(name).then(|| value.clone()))
+}
+
+fn comma_header_values(headers: &[(String, String)], name: &str) -> Vec<String> {
+    request_header(headers, name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn action_rate_limited(action_id: &str, headers: &[(String, String)]) -> bool {
@@ -1006,14 +1211,17 @@ fn write_dist(
     html: &lume_codegen_html::HtmlOutput,
     css: &str,
     js: &str,
+    record_metrics: bool,
+    metrics: &mut Vec<BenchMetric>,
 ) -> io::Result<()> {
     let assets = options.out_dir.join("assets");
     fs::create_dir_all(&assets)?;
+    let native_started = Instant::now();
     build_ffi_sources(options, ir)?;
-    fs::write(options.out_dir.join("index.html"), &html.html)?;
-    fs::write(assets.join("style.css"), css)?;
-    fs::write(assets.join("app.js"), js)?;
-    if options.target.wasm_enabled() {
+    push_bench_metric(metrics, record_metrics, "native link", native_started);
+
+    let wasm_bytes = if options.target.wasm_enabled() {
+        let wasm_started = Instant::now();
         let wasm_events = html
             .events
             .iter()
@@ -1031,6 +1239,17 @@ fn write_dist(
                 lume_codegen_wasm::WasmBackend::new().emit_skeleton()
             }
         };
+        push_bench_metric(metrics, record_metrics, "WASM generation", wasm_started);
+        Some(wasm)
+    } else {
+        None
+    };
+
+    let write_started = Instant::now();
+    fs::write(options.out_dir.join("index.html"), &html.html)?;
+    fs::write(assets.join("style.css"), css)?;
+    fs::write(assets.join("app.js"), js)?;
+    if let Some(wasm) = wasm_bytes {
         fs::write(assets.join("app.wasm"), wasm)?;
     } else {
         let stale_wasm = assets.join("app.wasm");
@@ -1046,16 +1265,28 @@ fn write_dist(
         assets.join("lume.backend.json"),
         backend_manifest(ir, options),
     )?;
+    push_bench_metric(metrics, record_metrics, "dist write", write_started);
     Ok(())
 }
 
 fn build_ffi_sources(options: &BuildOptions, ir: &lume_ir::LumeProgram) -> io::Result<()> {
     let project_root = project_root_for_entry(&options.entry);
     for module in &ir.ffi_modules {
-        if module.sources.is_empty() {
+        let target = module
+            .targets
+            .iter()
+            .find(|target| target.name == lume_ffi::current_platform());
+        let sources = target
+            .filter(|target| !target.sources.is_empty())
+            .map(|target| target.sources.as_slice())
+            .unwrap_or_else(|| module.sources.as_slice());
+        if sources.is_empty() {
             continue;
         }
-        let Some(library) = &module.library else {
+        let library = target
+            .and_then(|target| target.library.as_ref())
+            .or(module.library.as_ref());
+        let Some(library) = library else {
             continue;
         };
         let output = resolve_project_path(&project_root, library);
@@ -1067,10 +1298,13 @@ fn build_ffi_sources(options: &BuildOptions, ir: &lume_ir::LumeProgram) -> io::R
             command.arg("-std=c11");
         }
         command.arg("-shared").arg("-fPIC");
-        for source in &module.sources {
+        for source in sources {
             command.arg(resolve_project_path(&project_root, source));
         }
-        if let Some(header) = &module.header {
+        let header = target
+            .and_then(|target| target.header.as_ref())
+            .or(module.header.as_ref());
+        if let Some(header) = header {
             if let Some(include_dir) = resolve_project_path(&project_root, header).parent() {
                 command.arg("-I").arg(include_dir);
             }
@@ -1198,20 +1432,28 @@ fn manifest(
             let transaction = modifier_presence_value("transaction", "true")
                 .map(|value| unquote_lume_value(&value))
                 .unwrap_or_default();
+            let validation = modifier_value("validate")
+                .map(unquote_lume_value)
+                .unwrap_or_default();
             let input = action
                 .params
                 .iter()
                 .map(|param| {
                     format!(
-                        "{{ \"name\": \"{}\", \"type\": \"{}\" }}",
+                        "{{ \"name\": \"{}\", \"type\": \"{}\", \"modifier\": {} }}",
                         json_escape(&param.name),
-                        json_escape(&param.ty)
+                        json_escape(&param.ty),
+                        param
+                            .modifier
+                            .as_ref()
+                            .map(|value| format!("\"{}\"", json_escape(value)))
+                            .unwrap_or_else(|| "null".into())
                     )
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "      {{ \"id\": \"{}\", \"runtime\": \"{}\", \"auth\": {}, \"csrf\": {}, \"input\": [{}], \"output\": \"{}\", \"invalidates\": {}, \"maxBodySize\": {}, \"rateLimit\": {}, \"transaction\": {} }}",
+                "      {{ \"id\": \"{}\", \"runtime\": \"{}\", \"auth\": {}, \"csrf\": {}, \"input\": [{}], \"output\": \"{}\", \"validation\": {}, \"invalidates\": {}, \"maxBodySize\": {}, \"rateLimit\": {}, \"transaction\": {} }}",
                 json_escape(&action.name),
                 json_escape(&runtime),
                 auth
@@ -1220,6 +1462,7 @@ fn manifest(
                 csrf,
                 input,
                 json_escape(&action.return_ty),
+                optional_json_string(&validation),
                 optional_json_string(&invalidates),
                 optional_json_number(&max_body_size),
                 optional_json_string(&rate_limit),
@@ -1233,9 +1476,10 @@ fn manifest(
         .iter()
         .map(|query| {
             format!(
-                "      {{ \"name\": \"{}\", \"server\": {}, \"key\": {}, \"source\": \"{}\" }}",
+                "      {{ \"name\": \"{}\", \"server\": {}, \"mutation\": {}, \"key\": {}, \"source\": \"{}\" }}",
                 json_escape(&query.name),
                 query.is_server,
+                query.is_mutation,
                 query
                     .key
                     .as_ref()
@@ -1323,9 +1567,14 @@ fn manifest(
                         .iter()
                         .map(|param| {
                             format!(
-                                "{{ \"name\": \"{}\", \"type\": \"{}\" }}",
+                                "{{ \"name\": \"{}\", \"type\": \"{}\", \"modifier\": {} }}",
                                 json_escape(&param.name),
-                                json_escape(&param.ty)
+                                json_escape(&param.ty),
+                                param
+                                    .modifier
+                                    .as_ref()
+                                    .map(|value| format!("\"{}\"", json_escape(value)))
+                                    .unwrap_or_else(|| "null".into())
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1356,7 +1605,7 @@ fn manifest(
                 .collect::<Vec<_>>()
                 .join(", ");
             format!(
-                "      {{ \"name\": \"{}\", \"language\": {}, \"library\": {}, \"header\": {}, \"sources\": [{}], \"runtime\": [{}], \"safety\": {}, \"threadSafe\": {}, \"lock\": {}, \"functions\": [{}] }}",
+                "      {{ \"name\": \"{}\", \"language\": {}, \"library\": {}, \"header\": {}, \"namespace\": {}, \"abi\": {}, \"targets\": [{}], \"sources\": [{}], \"runtime\": [{}], \"safety\": {}, \"threadSafe\": {}, \"lock\": {}, \"functions\": [{}] }}",
                 json_escape(&module.name),
                 module
                     .language
@@ -1373,6 +1622,37 @@ fn manifest(
                     .as_ref()
                     .map(|value| format!("\"{}\"", json_escape(value)))
                     .unwrap_or_else(|| "null".into()),
+                module
+                    .namespace
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "null".into()),
+                module
+                    .abi
+                    .as_ref()
+                    .map(|value| format!("\"{}\"", json_escape(value)))
+                    .unwrap_or_else(|| "null".into()),
+                module
+                    .targets
+                    .iter()
+                    .map(|target| {
+                        format!(
+                            "{{ \"name\": \"{}\", \"library\": {}, \"header\": {} }}",
+                            json_escape(&target.name),
+                            target
+                                .library
+                                .as_ref()
+                                .map(|value| format!("\"{}\"", json_escape(value)))
+                                .unwrap_or_else(|| "null".into()),
+                            target
+                                .header
+                                .as_ref()
+                                .map(|value| format!("\"{}\"", json_escape(value)))
+                                .unwrap_or_else(|| "null".into())
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 module
                     .sources
                     .iter()

@@ -50,6 +50,7 @@ pub struct Param {
     pub name: String,
     pub ty: String,
     pub default: Option<Expr>,
+    pub modifier: Option<String>,
     pub span: Span,
 }
 
@@ -108,6 +109,7 @@ pub struct QueryDecl {
     pub key: Option<Expr>,
     pub source: Expr,
     pub is_server: bool,
+    pub is_mutation: bool,
     pub span: Span,
 }
 
@@ -117,12 +119,24 @@ pub struct FfiModuleDecl {
     pub language: Option<String>,
     pub library: Option<String>,
     pub header: Option<String>,
+    pub namespace: Option<String>,
+    pub abi: Option<String>,
     pub sources: Vec<String>,
+    pub targets: Vec<FfiTargetDecl>,
     pub runtime: Vec<String>,
     pub safety: Option<String>,
     pub thread_safe: Option<bool>,
     pub lock: Option<String>,
     pub functions: Vec<FfiFunctionDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct FfiTargetDecl {
+    pub name: String,
+    pub library: Option<String>,
+    pub header: Option<String>,
+    pub sources: Vec<String>,
     pub span: Span,
 }
 

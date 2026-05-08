@@ -24,6 +24,8 @@ pub struct NativeBridgeModule {
     pub language: String,
     pub library: Option<String>,
     pub header: Option<String>,
+    pub namespace: Option<String>,
+    pub abi: Option<String>,
     pub sources: Vec<String>,
     pub runtime: Vec<String>,
     pub safety: String,
@@ -215,7 +217,7 @@ impl NativeBridgeModule {
             .collect::<Vec<_>>()
             .join(", ");
         format!(
-            "{{ \"name\": \"{}\", \"language\": \"{}\", \"library\": {}, \"header\": {}, \"sources\": [{}], \"runtime\": [{}], \"safety\": \"{}\", \"threadSafe\": {}, \"lock\": {}, \"symbols\": [{}] }}",
+            "{{ \"name\": \"{}\", \"language\": \"{}\", \"library\": {}, \"header\": {}, \"namespace\": {}, \"abi\": {}, \"sources\": [{}], \"runtime\": [{}], \"safety\": \"{}\", \"threadSafe\": {}, \"lock\": {}, \"symbols\": [{}] }}",
             escape_json(&self.name),
             escape_json(&self.language),
             self.library
@@ -223,6 +225,14 @@ impl NativeBridgeModule {
                 .map(|value| format!("\"{}\"", escape_json(value)))
                 .unwrap_or_else(|| "null".into()),
             self.header
+                .as_ref()
+                .map(|value| format!("\"{}\"", escape_json(value)))
+                .unwrap_or_else(|| "null".into()),
+            self.namespace
+                .as_ref()
+                .map(|value| format!("\"{}\"", escape_json(value)))
+                .unwrap_or_else(|| "null".into()),
+            self.abi
                 .as_ref()
                 .map(|value| format!("\"{}\"", escape_json(value)))
                 .unwrap_or_else(|| "null".into()),
@@ -396,8 +406,10 @@ fn plan_module(module: &FfiModule, known: &KnownTypes) -> NativeBridgeModule {
     NativeBridgeModule {
         name: module.name.clone(),
         language: module.language.clone(),
-        library: module.library.clone(),
+        library: module.library_for_current_platform().map(str::to_string),
         header: module.header.clone(),
+        namespace: module.namespace.clone(),
+        abi: module.abi.clone(),
         sources: module.sources.clone(),
         runtime: module.runtime.iter().map(runtime_name).collect(),
         safety: match module.safety {
@@ -646,6 +658,7 @@ mod tests {
             params: vec![FfiField {
                 name: "v".into(),
                 ty: FfiType::Named("Vec2".into()),
+                modifier: None,
             }],
             return_ty: FfiType::Primitive("f32".into()),
             ownership: Ownership::Borrowed,
@@ -675,6 +688,8 @@ mod tests {
                 language: "c".into(),
                 library: Some("./libgeom.so".into()),
                 header: None,
+                namespace: None,
+                abi: None,
                 sources: Vec::new(),
                 runtime: vec!["native".into()],
                 safety: "safe".into(),

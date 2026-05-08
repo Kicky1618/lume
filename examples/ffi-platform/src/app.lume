@@ -1,0 +1,78 @@
+import { bytes } from "lume/std/bytes"
+
+ffi module nativehash {
+  language "cpp"
+  namespace "nativehash"
+  abi "cxx"
+
+  target linux-x64 {
+    library "./native/linux-x64/libnativehash.so"
+    header "./native/nativehash.hpp"
+    sources ["./native/linux-x64/nativehash.cpp"]
+  }
+
+  target darwin-arm64 {
+    library "./native/darwin-arm64/libnativehash.dylib"
+    header "./native/nativehash.hpp"
+  }
+
+  target windows-x64 {
+    library "./native/windows-x64/nativehash.dll"
+    header "./native/nativehash.hpp"
+  }
+
+  fn hash(input: Borrowed<Bytes>): Owned<Bytes> free=bytes_free
+  fn hash_preview_rgba(width: i32, height: i32, input: Borrowed<Bytes>): Owned<Bytes> free=bytes_free
+  fn bytes_free(bytes: Ptr<u8>): Void
+}
+
+component App {
+  state sample: String = "ffi-platform"
+  state digest: String = "ready"
+  state previewWidth: i64 = 320
+  state previewHeight: i64 = 96
+
+  async action refreshDigest {
+    digest = bytes.hex(await nativehash.hash(sample))
+  }
+
+  view {
+    Column gap=12 padding=16 {
+      Text("FFI Platform Target")
+      Text("The module declares a C++ ABI, per-platform libraries, and a native symbol.")
+
+      Input(value=sample, label="Input") {
+        on input(value) {
+          sample = value
+          refreshDigest()
+        }
+      }
+
+      Row gap=12 {
+        Input(value=previewWidth, label="Width")
+        Input(value=previewHeight, label="Height")
+      }
+
+      ImageCanvas(
+        renderer=nativehash.hash_preview_rgba,
+        width=previewWidth,
+        height=previewHeight,
+        ariaLabel="Hash preview",
+        args={
+          width: previewWidth,
+          height: previewHeight,
+          input: sample
+        },
+        fallback="cpu"
+      )
+
+      Button("Refresh digest") {
+        on click {
+          refreshDigest()
+        }
+      }
+
+      Text("Digest: {digest}")
+    }
+  }
+}

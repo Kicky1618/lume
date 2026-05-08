@@ -38,6 +38,47 @@ pub fn generate_with_options(
     js.push_str("};\n\n");
     js.push_str("const state = {};\n\n");
     js.push_str("let resumableManifest = null;\n\n");
+    js.push_str("function lumeBytesView(value) {\n");
+    js.push_str("  if (value instanceof Uint8Array) return value;\n");
+    js.push_str("  if (value instanceof ArrayBuffer) return new Uint8Array(value);\n");
+    js.push_str("  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);\n");
+    js.push_str("  if (Array.isArray(value)) return new Uint8Array(value);\n");
+    js.push_str("  if (typeof value === \"string\") return new TextEncoder().encode(value);\n");
+    js.push_str("  return new Uint8Array();\n");
+    js.push_str("}\n\n");
+    js.push_str("const bytes = {\n");
+    js.push_str("  hex(value) { return Array.from(lumeBytesView(value), byte => byte.toString(16).padStart(2, \"0\")).join(\"\"); },\n");
+    js.push_str("  utf8(value) { return new TextDecoder().decode(lumeBytesView(value)); }\n");
+    js.push_str("};\n\n");
+    if !program.ffi_modules.is_empty() {
+        js.push_str("async function callNativeBytes(moduleName, symbolName, args) {\n");
+        js.push_str("  const url = new URL(`/__lume/native/${encodeURIComponent(moduleName)}/${encodeURIComponent(symbolName)}`, window.location.href);\n");
+        js.push_str("  for (const value of args) url.searchParams.append('args', value instanceof Uint8Array || value instanceof ArrayBuffer || ArrayBuffer.isView(value) ? bytes.utf8(value) : String(value ?? ''));\n");
+        js.push_str("  const response = await fetch(url);\n");
+        js.push_str("  if (!response.ok) throw new Error(await response.text());\n");
+        js.push_str("  return new Uint8Array(await response.arrayBuffer());\n");
+        js.push_str("}\n\n");
+        for module in &program.ffi_modules {
+            let functions = module
+                .functions
+                .iter()
+                .filter(|function| function.return_ty.contains("Bytes"))
+                .map(|function| {
+                    format!(
+                        "  async {}(...args) {{ return callNativeBytes({:?}, {:?}, args); }}",
+                        function.name, module.name, function.name
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !functions.is_empty() {
+                js.push_str(&format!(
+                    "const {} = {{\n{}\n}};\n\n",
+                    module.name,
+                    functions.join(",\n")
+                ));
+            }
+        }
+    }
     if wasm_enabled {
         js.push_str("const lumeWasm = await loadLumeWasm();\n\n");
         js.push_str("const lumeWasmStateNames = [");
@@ -104,7 +145,7 @@ pub fn generate_with_options(
         js.push_str("  return applyWasmPatch(ptr);\n");
         js.push_str("}\n\n");
     }
-    if !program.server_actions.is_empty() {
+    if !program.server_actions.is_empty() || program.queries.iter().any(|query| query.is_mutation) {
         js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"dev-csrf-token\";\n\n");
         js.push_str("const serverActionParams = {\n");
         for action in &program.server_actions {
@@ -402,6 +443,16 @@ pub fn generate_with_options(
         );
         js.push_str("};\n\n");
         for query in program.queries.iter().filter(|query| !query.is_server) {
+            if query.is_mutation {
+                js.push_str(&format!(
+                    "const {} = {{\n  async mutate(input) {{\n    const response = await fetch({}, {{ method: \"POST\", headers: {{ \"content-type\": \"application/json\", \"x-lume-csrf\": lumeCsrfToken }}, body: JSON.stringify(input ?? null) }});\n    if (!response.ok) throw new ActionError(`Mutation {} failed`, {{ status: response.status, action: {:?} }});\n    return response.json();\n  }}\n}};\n\n",
+                    query.name,
+                    query_source_url(&query.source),
+                    query.name,
+                    query.name
+                ));
+                continue;
+            }
             let key = query
                 .key
                 .as_ref()
@@ -448,6 +499,35 @@ pub fn generate_with_options(
     js.push_str("  restoreInlineSerializedState();\n");
     js.push_str("}\n\n");
     js.push_str("const root = document.getElementById(\"lume-root\");\n");
+    js.push_str("let __lumeCompositionDepth = 0;\n");
+    js.push_str("let __lumeDeferredRender = false;\n");
+    js.push_str("let __lumeDeferredRenderTimer = 0;\n\n");
+    js.push_str("function __lumeShouldDeferRender(event) {\n");
+    js.push_str("  return Boolean(event?.isComposing || __lumeCompositionDepth > 0);\n");
+    js.push_str("}\n\n");
+    js.push_str("function __lumeFlushDeferredRender() {\n");
+    js.push_str("  if (!__lumeDeferredRender || __lumeCompositionDepth > 0) return;\n");
+    js.push_str("  __lumeDeferredRender = false;\n");
+    js.push_str("  render_all();\n");
+    js.push_str("  persistStateScope();\n");
+    js.push_str("}\n\n");
+    js.push_str("function __lumeRequestRender(event) {\n");
+    js.push_str("  if (__lumeShouldDeferRender(event)) {\n");
+    js.push_str("    __lumeDeferredRender = true;\n");
+    js.push_str("    return false;\n");
+    js.push_str("  }\n");
+    js.push_str("  render_all();\n");
+    js.push_str("  return true;\n");
+    js.push_str("}\n\n");
+    js.push_str("root?.addEventListener(\"compositionstart\", () => {\n");
+    js.push_str("  __lumeCompositionDepth += 1;\n");
+    js.push_str("}, true);\n\n");
+    js.push_str("root?.addEventListener(\"compositionend\", () => {\n");
+    js.push_str("  __lumeCompositionDepth = Math.max(0, __lumeCompositionDepth - 1);\n");
+    js.push_str("  if (!__lumeDeferredRender) return;\n");
+    js.push_str("  clearTimeout(__lumeDeferredRenderTimer);\n");
+    js.push_str("  __lumeDeferredRenderTimer = setTimeout(__lumeFlushDeferredRender, 0);\n");
+    js.push_str("}, true);\n\n");
     if dynamic_view {
         js.push_str("\nfunction escapeHtml(value) {\n");
         js.push_str("  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');\n");
@@ -544,16 +624,16 @@ pub fn generate_with_options(
     js.push_str("  return name.replaceAll('_', '-').replace(/[A-Z]/g, value => `-${value.toLowerCase()}`).replace(/^-/, '');\n");
     js.push_str("}\n\n");
     js.push_str("async function drawNativeCanvases() {\n");
-    js.push_str("  for (const canvas of root.querySelectorAll('canvas[data-lume-native-module][data-lume-native-symbol]')) {\n");
+    js.push_str("  for (const canvas of root.querySelectorAll('canvas[data-lume-native-module][data-lume-native-symbol],canvas[data-lume-native-image-module][data-lume-native-image-symbol]')) {\n");
     js.push_str(
         "    const width = Math.max(1, Math.floor(Number(canvas.getAttribute('width') || 640)));\n",
     );
     js.push_str("    const height = Math.max(1, Math.floor(Number(canvas.getAttribute('height') || 360)));\n");
     js.push_str("    if (canvas.width !== width) canvas.width = width;\n");
     js.push_str("    if (canvas.height !== height) canvas.height = height;\n");
-    js.push_str("    const moduleName = canvas.dataset.lumeNativeModule || '';\n");
-    js.push_str("    const symbolName = canvas.dataset.lumeNativeSymbol || '';\n");
-    js.push_str("    const argNames = String(canvas.dataset.lumeNativeArgs || '').split(',').map(value => value.trim()).filter(Boolean);\n");
+    js.push_str("    const moduleName = canvas.dataset.lumeNativeImageModule || canvas.dataset.lumeNativeModule || '';\n");
+    js.push_str("    const symbolName = canvas.dataset.lumeNativeImageSymbol || canvas.dataset.lumeNativeSymbol || '';\n");
+    js.push_str("    const argNames = String(canvas.dataset.lumeNativeImageArgs || canvas.dataset.lumeNativeArgs || '').split(',').map(value => value.trim()).filter(Boolean);\n");
     js.push_str("    const renderKey = [moduleName, symbolName, width, height, ...argNames.map(name => canvas.getAttribute(`data-${nativeCanvasDataAttr(name)}`) || '')].join('|');\n");
     js.push_str("    const readyKey = canvas.dataset.lumeNativeRenderKey || '';\n");
     js.push_str("    const pendingKey = canvas.dataset.lumeNativePendingKey || '';\n");
@@ -599,7 +679,7 @@ pub fn generate_with_options(
                 "    if (await dispatchWasmEvent({})) {{\n",
                 event.id
             ));
-            js.push_str("      render_all();\n");
+            js.push_str("      __lumeRequestRender(event);\n");
             js.push_str("      persistStateScope();\n");
             js.push_str("      return;\n");
             js.push_str("    }\n");
@@ -610,7 +690,7 @@ pub fn generate_with_options(
             js.push_str(&stmt_js(stmt, &locals, &state_names));
             js.push('\n');
         }
-        js.push_str("    render_all();\n");
+        js.push_str("    __lumeRequestRender(event);\n");
         js.push_str("    persistStateScope();\n");
         js.push_str("  },\n");
     }
@@ -684,7 +764,7 @@ pub fn generate_with_options(
         js.push_str("  const args = action.formData(form);\n");
         js.push_str("  void action.mutate(...args).then(value => {\n");
         js.push_str("    form.dispatchEvent(new CustomEvent(\"lume:success\", { bubbles: true, detail: { value } }));\n");
-        js.push_str("    render_all();\n");
+        js.push_str("    __lumeRequestRender();\n");
         js.push_str("  }).catch(error => {\n");
         js.push_str("    form.dispatchEvent(new CustomEvent(\"lume:error\", { bubbles: true, detail: { error } }));\n");
         js.push_str("  });\n");
@@ -802,6 +882,7 @@ fn render_element_template(
         "Input" => render_input_template(element, ctx, locals, states),
         "Image" => render_image_template(element, ctx, locals, states),
         "Canvas" => render_canvas_template(element, ctx, locals, states),
+        "ImageCanvas" => render_image_canvas_template(element, ctx, locals, states),
         "NativeCanvas" => render_native_canvas_template(element, ctx, locals, states),
         "GpuCanvas" => render_gpu_canvas_template(element, ctx, locals, states),
         "Link" | "NavLink" | "Anchor" => {
@@ -1046,6 +1127,16 @@ fn render_canvas_template(
     render_canvas_surface_template(element, ctx, locals, states, String::new())
 }
 
+fn render_image_canvas_template(
+    element: &ElementNode,
+    ctx: &mut RenderCtx,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    let native_attrs = native_image_canvas_attrs_template(element, locals, states);
+    render_canvas_surface_template(element, ctx, locals, states, native_attrs)
+}
+
 fn render_native_canvas_template(
     element: &ElementNode,
     ctx: &mut RenderCtx,
@@ -1144,7 +1235,9 @@ fn component_actions_js(program: &LumeProgram, states: &HashSet<String>) -> Stri
         js.push_str(
             "      if (mode !== \"restart\" || token === entry.token) entry.pending = false;\n",
         );
-        js.push_str("      if (typeof render_all === \"function\") render_all();\n");
+        js.push_str(
+            "      if (typeof __lumeRequestRender === \"function\") __lumeRequestRender();\n",
+        );
         js.push_str("      if (typeof persistStateScope === \"function\") persistStateScope();\n");
         js.push_str("    }\n");
         js.push_str("  };\n");
@@ -1216,6 +1309,23 @@ fn native_canvas_attrs_template(
     locals: &HashSet<String>,
     states: &HashSet<String>,
 ) -> String {
+    native_renderer_attrs_template(element, locals, states, "native")
+}
+
+fn native_image_canvas_attrs_template(
+    element: &ElementNode,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+) -> String {
+    native_renderer_attrs_template(element, locals, states, "native-image")
+}
+
+fn native_renderer_attrs_template(
+    element: &ElementNode,
+    locals: &HashSet<String>,
+    states: &HashSet<String>,
+    kind: &str,
+) -> String {
     let Some((module, symbol)) =
         attr_value(element, "renderer").and_then(|expr| native_renderer(expr.raw.trim()))
     else {
@@ -1241,9 +1351,12 @@ fn native_canvas_attrs_template(
         .collect::<Vec<_>>()
         .join("");
     format!(
-        " data-lume-native-module=\"{}\" data-lume-native-symbol=\"{}\" data-lume-native-args=\"{}\"{}",
+        " data-lume-{}-module=\"{}\" data-lume-{}-symbol=\"{}\" data-lume-{}-args=\"{}\"{}",
+        kind,
         escape_template(&module),
+        kind,
         escape_template(&symbol),
+        kind,
         escape_template(&arg_names),
         arg_attrs
     )
@@ -1629,7 +1742,7 @@ fn node_has_dynamic(node: &ViewNode, program: &LumeProgram) -> bool {
             }
             if matches!(
                 element.name.as_str(),
-                "Canvas" | "NativeCanvas" | "GpuCanvas"
+                "Canvas" | "ImageCanvas" | "NativeCanvas" | "GpuCanvas"
             ) {
                 return true;
             }
@@ -2030,6 +2143,12 @@ component App {
         assert!(js.contains("restoreFocus(focus);"));
         assert!(js.contains("function captureFocus()"));
         assert!(js.contains("function restoreFocus(focus)"));
+        assert!(js.contains("root?.addEventListener(\"compositionstart\""));
+        assert!(js.contains("root?.addEventListener(\"compositionend\""));
+        assert!(js.contains("function __lumeRequestRender(event)"));
+        assert!(js.contains("event?.isComposing || __lumeCompositionDepth > 0"));
+        assert!(js.contains("setTimeout(__lumeFlushDeferredRender, 0)"));
+        assert!(js.contains("    __lumeRequestRender(event);\n    persistStateScope();"));
         assert!(js.contains("data-lume-focus-key=\"n"));
     }
 
@@ -2090,6 +2209,50 @@ component App {
         assert!(js.contains("bindActionFunction(add, serverActions[\"add\"]);"));
         assert!(js.contains("void actions[0](event, target);"));
         assert!(js.contains("add(state.count);"));
+    }
+
+    #[test]
+    fn generates_bytes_helpers_and_ffi_bytes_stubs() {
+        let source = r#"
+import { bytes } from "lume/std/bytes"
+
+ffi module nativehash {
+  library "./native/libnativehash.so"
+  fn hash(input: Borrowed<Bytes>): Owned<Bytes> free=bytes_free
+  fn bytes_free(bytes: Ptr<u8>): Void
+}
+
+component App {
+  state sample: String = "lume"
+  state digest: String = ""
+
+  async action refreshDigest {
+    digest = bytes.hex(await nativehash.hash(sample))
+  }
+
+  view {
+    Button("Hash") {
+      on click {
+        refreshDigest()
+      }
+    }
+    Text("Digest: {digest}")
+  }
+}
+"#;
+        let (program, diagnostics) = parse(source);
+        assert!(!diagnostics.has_errors());
+        let ir = build(&lower(program)).expect("ir");
+        let html = generate_html(&ir);
+        let js = generate(&ir, &html);
+        assert!(js.contains("const bytes = {"));
+        assert!(js.contains("hex(value)"));
+        assert!(js.contains("async function callNativeBytes(moduleName, symbolName, args)"));
+        assert!(js.contains("const nativehash = {"));
+        assert!(js.contains(
+            "async hash(...args) { return callNativeBytes(\"nativehash\", \"hash\", args); }"
+        ));
+        assert!(js.contains("state.digest = bytes.hex(await nativehash.hash(state.sample));"));
     }
 
     #[test]
@@ -2159,7 +2322,7 @@ component App {
     }
 
     #[test]
-    fn generates_native_canvas_attrs_and_component_actions() {
+    fn generates_image_canvas_attrs_and_component_actions() {
         let source = r#"
 component App {
   state width: i64 = 320
@@ -2172,7 +2335,7 @@ component App {
 
   view {
     Column {
-      NativeCanvas(
+      ImageCanvas(
         renderer=renderkit.mandelbrot_render,
         width=width,
         height=height,
@@ -2199,9 +2362,9 @@ component App {
         let js = generate(&ir, &html);
         assert!(js.contains("function zoomIn()"));
         assert!(js.contains("state.scale += 15;"));
-        assert!(js.contains("data-lume-native-module=\"renderkit\""));
-        assert!(js.contains("data-lume-native-symbol=\"mandelbrot_render\""));
-        assert!(js.contains("data-lume-native-args=\"width,height,scale\""));
+        assert!(js.contains("data-lume-native-image-module=\"renderkit\""));
+        assert!(js.contains("data-lume-native-image-symbol=\"mandelbrot_render\""));
+        assert!(js.contains("data-lume-native-image-args=\"width,height,scale\""));
         assert!(js.contains("data-scale=\"${escapeAttr(state.scale ?? \"\")}\""));
         assert!(js.contains("zoomIn();"));
     }

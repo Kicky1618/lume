@@ -1,0 +1,62 @@
+mutation saveDraft = api.post("/drafts")
+
+server action createUser(input: Object): Object
+  validate {
+    input.email: required email
+    input.password: required minLength(8)
+  }
+{
+  return input
+}
+
+server action deleteUser(id: String): String auth role="admin" {
+  return id
+}
+
+server action grantEditor(id: String): String auth can="post:update" csrf false {
+  return id
+}
+
+component App {
+  state email: String = "writer@example.com"
+  state password: String = "sufficiently-long"
+  state status: String = "idle"
+
+  view {
+    Column gap=12 padding=16 {
+      Text("Action Guardrails")
+      Text("Mutation, validation, and auth are wired together in one compact example.")
+
+      Input(value=email, label="Email", placeholder="writer@example.com") {
+        on input(value) {
+          email = value
+        }
+      }
+
+      Input(value=password, label="Password", placeholder="minimum eight characters") {
+        on input(value) {
+          password = value
+        }
+      }
+
+      Row gap=12 {
+        Button("Create user") {
+          on click {
+            status = "creating"
+            await createUser({ email: email, password: password })
+          }
+        }
+
+        Button("Save draft") {
+          on click {
+            await saveDraft.mutate({ title: "Example draft", body: "Typed from the mutation stub." })
+          }
+        }
+      }
+
+      if status != "" {
+        Text("Status: {status}")
+      }
+    }
+  }
+}
