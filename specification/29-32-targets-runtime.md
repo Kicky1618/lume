@@ -654,7 +654,7 @@ mpa: route ごとに HTML を生成
 hybrid: 静的 route は HTML、動的 route は JS router
 ```
 
-現行実装は `spa` に寄せた client-side router を生成する。`mpa` と `hybrid` の route ごとの HTML 分割は [未実装]。
+現行実装は `frontend.routing` に応じて `spa` / `mpa` / `hybrid` を切り替え、`hybrid` では静的 route ごとの HTML と client router を併用する。`server` は dev server 側で route IR を使って解決する。`base_path` と `trailing_slash` は HTML 生成と dev 配信の両方に反映される。
 
 ---
 

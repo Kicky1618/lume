@@ -18,6 +18,16 @@ pub fn generate_with_options(
     wasm_enabled: bool,
     resume: bool,
 ) -> String {
+    generate_with_router_options(program, html, wasm_enabled, resume, true)
+}
+
+pub fn generate_with_router_options(
+    program: &LumeProgram,
+    html: &HtmlOutput,
+    wasm_enabled: bool,
+    resume: bool,
+    intercept_links: bool,
+) -> String {
     let state_names = program
         .states()
         .map(|state| state.name.clone())
@@ -143,6 +153,23 @@ pub fn generate_with_options(
         js.push_str("  syncWasmState();\n");
         js.push_str("  const ptr = dispatch(id, 0, 0);\n");
         js.push_str("  return applyWasmPatch(ptr);\n");
+        js.push_str("}\n\n");
+        js.push_str("function callWasmRouteMatch(path) {\n");
+        js.push_str("  const match = lumeWasm.exports.lume_route_match;\n");
+        js.push_str("  const alloc = lumeWasm.exports.lume_alloc;\n");
+        js.push_str("  if (!lumeWasm.enabled || typeof match !== \"function\" || typeof alloc !== \"function\" || !(lumeWasm.exports.memory instanceof WebAssembly.Memory)) return 0;\n");
+        js.push_str("  const bytes = new TextEncoder().encode(path);\n");
+        js.push_str("  const ptr = alloc(bytes.byteLength);\n");
+        js.push_str(
+            "  new Uint8Array(lumeWasm.exports.memory.buffer, ptr, bytes.byteLength).set(bytes);\n",
+        );
+        js.push_str("  const route = match(ptr, bytes.byteLength) | 0;\n");
+        js.push_str("  if (typeof lumeWasm.exports.lume_free === \"function\") lumeWasm.exports.lume_free(ptr);\n");
+        js.push_str("  return route;\n");
+        js.push_str("}\n\n");
+        js.push_str("function renderWasmRoute(path) {\n");
+        js.push_str("  const route = routeTable[callWasmRouteMatch(path) - 1];\n");
+        js.push_str("  return route ? route.renderer({}) : null;\n");
         js.push_str("}\n\n");
     }
     if !program.server_actions.is_empty() || program.queries.iter().any(|query| query.is_mutation) {
@@ -544,7 +571,12 @@ pub fn generate_with_options(
                 ..RenderCtx::default()
             };
             if !program.routes.is_empty() {
-                js.push_str(&route_runtime(program, &mut ctx, &state_names));
+                js.push_str(&route_runtime(
+                    program,
+                    &mut ctx,
+                    &state_names,
+                    intercept_links,
+                ));
             }
             js.push_str("function render_app() {\n");
             js.push_str("  return ");
@@ -915,7 +947,12 @@ fn render_component_template(
     format!("${{{html}}}")
 }
 
-fn route_runtime(program: &LumeProgram, ctx: &mut RenderCtx, states: &HashSet<String>) -> String {
+fn route_runtime(
+    program: &LumeProgram,
+    ctx: &mut RenderCtx,
+    states: &HashSet<String>,
+    intercept_links: bool,
+) -> String {
     let routes = program
         .routes
         .iter()
@@ -952,8 +989,14 @@ fn route_runtime(program: &LumeProgram, ctx: &mut RenderCtx, states: &HashSet<St
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "const routeTable = [\n{}\n];\n\n{}\nfunction normalizeRoutePath(path) {{\n  if (!path || path === \"/\") return \"/\";\n  return path.endsWith(\"/\") ? path.slice(0, -1) : path;\n}}\n\nfunction matchRoute(route, path) {{\n  const parts = path === \"/\" ? [] : path.replace(/^\\//, \"\").split(\"/\");\n  const params = {{}};\n  let index = 0;\n  for (const segment of route.segments) {{\n    if (segment.kind === \"static\") {{\n      if (parts[index] !== segment.value) return null;\n      index += 1;\n    }} else if (segment.kind === \"dynamic\") {{\n      const value = parts[index];\n      if (value === undefined) return null;\n      if (segment.type !== \"String\" && !/^-?\\d+$/.test(value)) return null;\n      params[segment.name] = value;\n      index += 1;\n    }} else if (segment.kind === \"catchAll\") {{\n      params[segment.name] = parts.slice(index).join(\"/\");\n      index = parts.length;\n      break;\n    }}\n  }}\n  return index === parts.length ? params : null;\n}}\n\nfunction render_route() {{\n  const path = normalizeRoutePath(window.location.pathname);\n  for (const route of routeTable) {{\n    const params = matchRoute(route, path);\n    if (params) return route.renderer(params);\n  }}\n  return \"\";\n}}\n\nfunction navigate(to) {{\n  const url = new URL(to, window.location.href);\n  if (url.origin !== window.location.origin) {{\n    window.location.href = url.href;\n    return;\n  }}\n  if (url.pathname === window.location.pathname && url.search === window.location.search) return;\n  history.pushState(null, \"\", url.pathname + url.search + url.hash);\n  render_all();\n}}\n\nwindow.addEventListener(\"popstate\", () => render_all());\n\nroot.addEventListener(\"click\", event => {{\n  const link = event.target.closest(\"a[data-lume-link]\");\n  if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target) return;\n  const url = new URL(link.getAttribute(\"href\") || \"\", window.location.href);\n  if (url.origin !== window.location.origin) return;\n  event.preventDefault();\n  navigate(url.pathname + url.search + url.hash);\n}});\n\nfunction updateNavLinks() {{\n  const current = normalizeRoutePath(window.location.pathname);\n  for (const link of root.querySelectorAll(\"a[data-lume-navlink]\")) {{\n    const href = normalizeRoutePath(new URL(link.getAttribute(\"href\") || \"/\", window.location.href).pathname);\n    const active = href === current;\n    link.toggleAttribute(\"aria-current\", active);\n    link.classList.toggle(\"is-active\", active);\n  }}\n}}\n\n",
-        routes, renderers
+        "const routeTable = [\n{}\n];\n\n{}\nfunction normalizeRoutePath(path) {{\n  if (!path || path === \"/\") return \"/\";\n  return path.endsWith(\"/\") ? path.slice(0, -1) : path;\n}}\n\nfunction matchRoute(route, path) {{\n  const parts = path === \"/\" ? [] : path.replace(/^\\//, \"\").split(\"/\");\n  const params = {{}};\n  let index = 0;\n  for (const segment of route.segments) {{\n    if (segment.kind === \"static\") {{\n      if (parts[index] !== segment.value) return null;\n      index += 1;\n    }} else if (segment.kind === \"dynamic\") {{\n      const value = parts[index];\n      if (value === undefined) return null;\n      if (segment.type !== \"String\" && !/^-?\\d+$/.test(value)) return null;\n      params[segment.name] = value;\n      index += 1;\n    }} else if (segment.kind === \"catchAll\") {{\n      params[segment.name] = parts.slice(index).join(\"/\");\n      index = parts.length;\n      break;\n    }}\n  }}\n  return index === parts.length ? params : null;\n}}\n\nfunction render_route() {{\n  const path = normalizeRoutePath(window.location.pathname);\n  if (typeof renderWasmRoute === \"function\") {{\n    const html = renderWasmRoute(path);\n    if (html !== null) return html;\n  }}\n  for (const route of routeTable) {{\n    const params = matchRoute(route, path);\n    if (params) return route.renderer(params);\n  }}\n  return \"\";\n}}\n\nfunction navigate(to) {{\n  const url = new URL(to, window.location.href);\n  if (url.origin !== window.location.origin) {{\n    window.location.href = url.href;\n    return;\n  }}\n  if (url.pathname === window.location.pathname && url.search === window.location.search) return;\n  history.pushState(null, \"\", url.pathname + url.search + url.hash);\n  render_all();\n}}\n\nwindow.addEventListener(\"popstate\", () => render_all());\n\n{}\nfunction updateNavLinks() {{\n  const current = normalizeRoutePath(window.location.pathname);\n  for (const link of root.querySelectorAll(\"a[data-lume-navlink]\")) {{\n    const href = normalizeRoutePath(new URL(link.getAttribute(\"href\") || \"/\", window.location.href).pathname);\n    const active = href === current;\n    link.toggleAttribute(\"aria-current\", active);\n    link.classList.toggle(\"is-active\", active);\n  }}\n}}\n\n",
+        routes,
+        renderers,
+        if intercept_links {
+            "root.addEventListener(\"click\", event => {\n  const link = event.target.closest(\"a[data-lume-link]\");\n  if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || link.target) return;\n  const url = new URL(link.getAttribute(\"href\") || \"\", window.location.href);\n  if (url.origin !== window.location.origin) return;\n  event.preventDefault();\n  navigate(url.pathname + url.search + url.hash);\n});\n\n"
+        } else {
+            ""
+        }
     )
 }
 
@@ -2432,6 +2475,11 @@ component App {
         assert!(js.contains("Login required"));
         assert!(js.contains("User ${escapeHtml(params.id)}"));
         assert!(js.contains("${render_route()}"));
+
+        let wasm_js = generate_with_options(&ir, &html, true, true);
+        assert!(wasm_js.contains("function callWasmRouteMatch(path)"));
+        assert!(wasm_js.contains("const match = lumeWasm.exports.lume_route_match;"));
+        assert!(wasm_js.contains("const html = renderWasmRoute(path);"));
     }
 
     #[test]

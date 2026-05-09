@@ -2,3 +2,6 @@
 name = "routing-tree"
 entry = "src/app.lume"
 out_dir = "dist"
+
+[frontend]
+routing = "hybrid"

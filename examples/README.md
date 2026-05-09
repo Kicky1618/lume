@@ -17,7 +17,7 @@ Examples:
 - `scoreboard`: multiple counters and conditional text.
 - `form-state`: small form-like state preview.
 - `composed-card`: local `.lume` import with exported component and style.
-- `routing-tree`: nested routes, `index`, `layout`, `guard`, `:id`, and `*path` in one route manifest.
+- `routing-tree`: nested routes, `index`, `layout`, `guard`, `:id`, and `*path` in one route manifest. Build with `frontend.routing = "hybrid"` to get route-specific HTML for static paths and client fallback for dynamic ones.
 - `server-actions`: interpreted Server Actions, typed arguments, arrays, comparisons, and generated client stubs.
 - `action-guardrails`: `mutation`, `validation`, `auth role=`, and `auth can=` on one page.
 - `server-actions-jit`: numeric `runtime "jit"` Server Action compiled through the LLVM backend when available.

@@ -4,7 +4,7 @@ use lume_backend_native::{
 };
 use lume_diagnostics::{emit, Diagnostic};
 use lume_ffi::FfiRegistry;
-use lume_session::{BuildOptions, Session};
+use lume_session::{BuildOptions, FrontendRouting, Session, TrailingSlash};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -145,15 +145,16 @@ fn build_execution(options: BuildOptions, record_metrics: bool) -> io::Result<Bu
                     push_bench_metric(&mut metrics, record_metrics, "CSS emit", css_started);
 
                     let js_started = Instant::now();
-                    let js = lume_codegen_js::generate_with_options(
+                    let js = lume_codegen_js::generate_with_router_options(
                         &ir,
                         &html,
                         options.target.wasm_enabled(),
                         options.activation.is_resume(),
+                        options.frontend.routing.uses_spa_fallback(),
                     );
                     push_bench_metric(&mut metrics, record_metrics, "JS emit", js_started);
 
-                    write_dist(
+                    let route_html_files = write_dist(
                         &options,
                         &ir,
                         &html,
@@ -182,6 +183,7 @@ fn build_execution(options: BuildOptions, record_metrics: bool) -> io::Result<Bu
                             .display()
                             .to_string(),
                     ];
+                    emitted.extend(route_html_files);
                     if options.target.wasm_enabled() {
                         emitted.push(
                             options
@@ -392,8 +394,9 @@ fn handle_connection(mut stream: TcpStream, options: &BuildOptions) -> io::Resul
         );
     }
 
-    let path = resolve_request_path(&options.out_dir, target)
-        .or_else(|| spa_fallback_path(&options.out_dir, target));
+    let frontend_target = frontend_request_target(options, target).unwrap_or(target.to_string());
+    let path = resolve_request_path(&options.out_dir, &frontend_target)
+        .or_else(|| router_fallback_path(options, &frontend_target));
     let Some(path) = path else {
         return write_response(
             &mut stream,
@@ -415,7 +418,7 @@ fn handle_connection(mut stream: TcpStream, options: &BuildOptions) -> io::Resul
         );
     }
 
-    if let Some(fallback) = spa_fallback_path(&options.out_dir, target) {
+    if let Some(fallback) = router_fallback_path(options, &frontend_target) {
         if let Ok(body) = fs::read(&fallback) {
             let body = response_body_with_dev_csrf(&fallback, body);
             return write_response(
@@ -1120,6 +1123,19 @@ fn resolve_request_path(out_dir: &Path, target: &str) -> Option<PathBuf> {
         }
         resolved.push(segment);
     }
+    if resolved.exists() {
+        return Some(resolved);
+    }
+    if resolved.extension().is_none() {
+        let html = resolved.with_extension("html");
+        if html.exists() {
+            return Some(html);
+        }
+        let index = resolved.join("index.html");
+        if index.exists() {
+            return Some(index);
+        }
+    }
     Some(resolved)
 }
 
@@ -1132,6 +1148,77 @@ fn spa_fallback_path(out_dir: &Path, target: &str) -> Option<PathBuf> {
         return None;
     }
     Some(out_dir.join("index.html"))
+}
+
+fn frontend_request_target(options: &BuildOptions, target: &str) -> Option<String> {
+    let base = options.frontend.base_path.as_str();
+    if base == "/" {
+        return Some(target.to_string());
+    }
+    let (path, rest) = split_target_path_and_suffix(target);
+    if path == base {
+        return Some(format!("/{rest}"));
+    }
+    let prefix = format!("{base}/");
+    path.strip_prefix(&prefix)
+        .map(|stripped| format!("/{stripped}{rest}"))
+}
+
+fn split_target_path_and_suffix(target: &str) -> (&str, &str) {
+    let index = target.find(['?', '#']).unwrap_or(target.len());
+    (&target[..index], &target[index..])
+}
+
+fn html_with_base_path(html: &str, base_path: &str) -> String {
+    if base_path == "/" {
+        return html.to_string();
+    }
+    html.replace("href=\"/assets/", &format!("href=\"{base_path}/assets/"))
+        .replace("src=\"/assets/", &format!("src=\"{base_path}/assets/"))
+}
+
+fn normalize_url_path(path: &str) -> String {
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let mut normalized = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    normalized
+}
+
+fn router_fallback_path(options: &BuildOptions, target: &str) -> Option<PathBuf> {
+    match options.frontend.routing {
+        FrontendRouting::Spa | FrontendRouting::Hybrid => {
+            spa_fallback_path(&options.out_dir, target)
+        }
+        FrontendRouting::Server => {
+            server_route_matches(options, target).then(|| options.out_dir.join("index.html"))
+        }
+        FrontendRouting::Mpa => None,
+    }
+}
+
+fn server_route_matches(options: &BuildOptions, target: &str) -> bool {
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    if path.starts_with("/assets/") || path == "/assets" || path.contains('.') {
+        return false;
+    }
+    let Ok(source) = fs::read_to_string(&options.entry) else {
+        return false;
+    };
+    let (program, diagnostics) = lume_parser::parse(&source);
+    if diagnostics.has_errors() {
+        return false;
+    }
+    let hir = lume_hir::lower(program);
+    let Ok(ir) = lume_ir::build_with_base(&hir, options.entry.parent()) else {
+        return false;
+    };
+    lume_ir::match_route(&ir.routes, path).is_some()
 }
 
 fn percent_decode(input: &str) -> Option<String> {
@@ -1208,9 +1295,10 @@ fn mime_type(path: &Path) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        mime_type, parse_byte_size, resolve_request_path, response_body_with_dev_csrf,
-        spa_fallback_path,
+        frontend_request_target, html_with_base_path, mime_type, parse_byte_size,
+        resolve_request_path, response_body_with_dev_csrf, route_html_path, spa_fallback_path,
     };
+    use lume_session::{BuildOptions, TrailingSlash};
     use std::path::Path;
 
     #[test]
@@ -1233,6 +1321,43 @@ mod tests {
         );
         assert_eq!(spa_fallback_path(Path::new("dist"), "/assets/app.js"), None);
         assert_eq!(spa_fallback_path(Path::new("dist"), "/robots.txt"), None);
+    }
+
+    #[test]
+    fn maps_static_route_html_paths() {
+        assert_eq!(
+            route_html_path(Path::new("dist"), "/", TrailingSlash::Never),
+            Path::new("dist").join("index.html")
+        );
+        assert_eq!(
+            route_html_path(Path::new("dist"), "/users/login", TrailingSlash::Never),
+            Path::new("dist").join("users/login.html")
+        );
+        assert_eq!(
+            route_html_path(Path::new("dist"), "/users/login", TrailingSlash::Always),
+            Path::new("dist").join("users/login/index.html")
+        );
+    }
+
+    #[test]
+    fn strips_frontend_base_path_from_dev_requests() {
+        let mut options = BuildOptions::default();
+        options.frontend.base_path = "/docs".into();
+
+        assert_eq!(
+            frontend_request_target(&options, "/docs/users?tab=1").as_deref(),
+            Some("/users?tab=1")
+        );
+        assert_eq!(frontend_request_target(&options, "/app/users"), None);
+    }
+
+    #[test]
+    fn prefixes_asset_urls_with_frontend_base_path() {
+        let html = "<link rel=\"stylesheet\" href=\"/assets/style.css\"><script src=\"/assets/app.js\"></script>";
+        assert_eq!(
+            html_with_base_path(html, "/docs"),
+            "<link rel=\"stylesheet\" href=\"/docs/assets/style.css\"><script src=\"/docs/assets/app.js\"></script>"
+        );
     }
 
     #[test]
@@ -1282,7 +1407,7 @@ fn write_dist(
     js: &str,
     record_metrics: bool,
     metrics: &mut Vec<BenchMetric>,
-) -> io::Result<()> {
+) -> io::Result<Vec<String>> {
     let assets = options.out_dir.join("assets");
     fs::create_dir_all(&assets)?;
     let native_started = Instant::now();
@@ -1315,7 +1440,14 @@ fn write_dist(
     };
 
     let write_started = Instant::now();
-    fs::write(options.out_dir.join("index.html"), &html.html)?;
+    fs::write(
+        options.out_dir.join("index.html"),
+        html_with_base_path(&html.html, &options.frontend.base_path),
+    )?;
+    let mut emitted_route_html = Vec::new();
+    if options.frontend.routing.emits_route_html() {
+        emitted_route_html = write_route_html(options, ir)?;
+    }
     fs::write(assets.join("style.css"), css)?;
     fs::write(assets.join("app.js"), js)?;
     if let Some(wasm) = wasm_bytes {
@@ -1335,7 +1467,69 @@ fn write_dist(
         backend_manifest(ir, options),
     )?;
     push_bench_metric(metrics, record_metrics, "dist write", write_started);
-    Ok(())
+    Ok(emitted_route_html)
+}
+
+fn write_route_html(options: &BuildOptions, ir: &lume_ir::LumeProgram) -> io::Result<Vec<String>> {
+    let mut emitted = Vec::new();
+    for route in ir.routes.iter().filter(|route| {
+        route.view.is_some()
+            && route
+                .segments
+                .iter()
+                .all(|segment| matches!(segment, lume_ir::RouteSegment::Static(_)))
+    }) {
+        let path = route_html_path(
+            &options.out_dir,
+            &route.path,
+            options.frontend.trailing_slash,
+        );
+        if path == options.out_dir.join("index.html") {
+            let html = lume_codegen_html::generate_route_with_resume(
+                ir,
+                route,
+                options.activation.is_resume(),
+            );
+            fs::write(
+                &path,
+                html_with_base_path(&html.html, &options.frontend.base_path),
+            )?;
+        } else {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let html = lume_codegen_html::generate_route_with_resume(
+                ir,
+                route,
+                options.activation.is_resume(),
+            );
+            fs::write(
+                &path,
+                html_with_base_path(&html.html, &options.frontend.base_path),
+            )?;
+            emitted.push(path.display().to_string());
+        }
+    }
+    Ok(emitted)
+}
+
+fn route_html_path(out_dir: &Path, route_path: &str, trailing_slash: TrailingSlash) -> PathBuf {
+    let normalized = normalize_url_path(route_path);
+    if normalized == "/" {
+        return out_dir.join("index.html");
+    }
+    let route = normalized.trim_start_matches('/');
+    match trailing_slash {
+        TrailingSlash::Always => out_dir.join(route).join("index.html"),
+        TrailingSlash::Never => out_dir.join(format!("{route}.html")),
+        TrailingSlash::Preserve => {
+            if route_path.ends_with('/') {
+                out_dir.join(route.trim_end_matches('/')).join("index.html")
+            } else {
+                out_dir.join(format!("{route}.html"))
+            }
+        }
+    }
 }
 
 fn build_ffi_sources(options: &BuildOptions, ir: &lume_ir::LumeProgram) -> io::Result<()> {
@@ -1825,10 +2019,15 @@ fn manifest(
         .collect::<Vec<_>>()
         .join(",\n");
     format!(
-        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"activation\": \"{}\",\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"resumeGraph\": {{\n    \"boundaries\": [\n{}\n    ]\n  }},\n  \"symbols\": {{\n{}\n  }},\n  \"eventBindings\": [\n{}\n  ],\n  \"serializedState\": {{\n{}\n  }},\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
+        "{{\n  \"version\": \"0.1.0\",\n  \"component\": \"{}\",\n  \"target\": \"{}\",\n  \"activation\": \"{}\",\n  \"frontend\": {{ \"routing\": \"{}\", \"basePath\": \"{}\", \"trailingSlash\": \"{}\", \"router\": {{ \"scrollRestoration\": {}, \"focusMainOnNavigation\": {} }} }},\n  \"backends\": {},\n  \"state\": [\n{}\n  ],\n  \"resumeGraph\": {{\n    \"boundaries\": [\n{}\n    ]\n  }},\n  \"symbols\": {{\n{}\n  }},\n  \"eventBindings\": [\n{}\n  ],\n  \"serializedState\": {{\n{}\n  }},\n  \"routes\": [\n{}\n  ],\n  \"routeTree\": [\n{}\n  ],\n  \"styles\": [{}],\n  \"themes\": [{}],\n  \"actions\": [\n{}\n  ],\n  \"queries\": [\n{}\n  ],\n  \"ffi\": [\n{}\n  ],\n  \"ffiStructs\": [\n{}\n  ],\n  \"ffiEnums\": [\n{}\n  ],\n  \"ffiOpaques\": [\n{}\n  ]\n}}\n",
         json_escape(&ir.component.name),
         options.target.as_str(),
         options.activation.as_str(),
+        options.frontend.routing.as_str(),
+        json_escape(&options.frontend.base_path),
+        options.frontend.trailing_slash.as_str(),
+        options.frontend.router.scroll_restoration,
+        options.frontend.router.focus_main_on_navigation,
         backend_list(options),
         states,
         resume_graph_boundaries,
@@ -1952,8 +2151,9 @@ fn backend_manifest(ir: &lume_ir::LumeProgram, options: &BuildOptions) -> String
             format!("{{ \"modules\": [], \"errors\": [{}] }}", errors)
         });
     format!(
-        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {} }},\n  \"wasm\": {{ \"enabled\": {}, \"entry\": {}, \"target\": {}, \"abi\": {} }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {}, \"bridge\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
+        "{{\n  \"ssr\": {{ \"entry\": \"index.html\", \"routes\": {}, \"routing\": \"{}\" }},\n  \"wasm\": {{ \"enabled\": {}, \"entry\": {}, \"target\": {}, \"abi\": {} }},\n  \"native\": {{ \"enabled\": true, \"actions\": {}, \"ffiModules\": {}, \"bridge\": {} }},\n  \"jit\": {{ \"enabled\": true, \"actions\": {} }}\n}}\n",
         ir.routes.len(),
+        options.frontend.routing.as_str(),
         options.target.wasm_enabled(),
         if options.target.wasm_enabled() {
             "\"assets/app.wasm\""

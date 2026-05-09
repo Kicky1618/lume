@@ -53,7 +53,7 @@ impl WasmBackend {
         // A tiny valid module that exports the runtime ABI names expected by
         // the JS loader. This remains as a build-time fallback when the local
         // LLVM install has no WebAssembly target support.
-        encode_runtime_wasm_from_parts(&[], &[])
+        encode_runtime_wasm_from_parts(&[], &[], &[])
     }
 }
 
@@ -92,6 +92,7 @@ pub fn emit_llvm_wasm_with_events(
         exports: vec![
             "lume_init".into(),
             "lume_dispatch".into(),
+            "lume_route_match".into(),
             "lume_get_patch_len".into(),
             "lume_alloc".into(),
             "lume_free".into(),
@@ -122,24 +123,33 @@ fn encode_runtime_wasm(program: &LumeProgram, events: &[WasmEvent]) -> Vec<u8> {
         .filter_map(|event| compile_event(event, &state_map))
         .collect::<Vec<_>>();
 
-    encode_runtime_wasm_from_parts(&states, &compiled_events)
+    let static_routes = program
+        .routes
+        .iter()
+        .filter(|route| route.view.is_some())
+        .map(|route| route_has_only_static_segments(route).then_some(route.path.as_bytes()))
+        .collect::<Vec<_>>();
+
+    encode_runtime_wasm_from_parts(&states, &compiled_events, &static_routes)
 }
 
 fn encode_runtime_wasm_from_parts(
     states: &[(String, usize, i32)],
     compiled_events: &[CompiledEvent],
+    static_routes: &[Option<&[u8]>],
 ) -> Vec<u8> {
     let mut wasm = Vec::new();
     wasm.extend_from_slice(b"\0asm\x01\0\0\0");
     section(&mut wasm, 1, |out| {
-        leb(out, 4);
+        leb(out, 5);
         func_type(out, &[0x7f, 0x7f], &[]);
         func_type(out, &[0x7f, 0x7f, 0x7f], &[0x7f]);
         func_type(out, &[0x7f], &[0x7f]);
         func_type(out, &[0x7f], &[]);
+        func_type(out, &[0x7f, 0x7f], &[0x7f]);
     });
     section(&mut wasm, 3, |out| {
-        let types = [0, 1, 2, 2, 3, 0, 2];
+        let types = [0, 1, 4, 2, 2, 3, 0, 2];
         leb(out, types.len() as u32);
         for index in types {
             leb(out, index);
@@ -159,18 +169,19 @@ fn encode_runtime_wasm_from_parts(
         }
     });
     section(&mut wasm, 7, |out| {
-        leb(out, 8);
+        leb(out, 9);
         export(out, "memory", 0x02, 0);
         export(out, "lume_init", 0x00, 0);
         export(out, "lume_dispatch", 0x00, 1);
-        export(out, "lume_get_patch_len", 0x00, 2);
-        export(out, "lume_alloc", 0x00, 3);
-        export(out, "lume_free", 0x00, 4);
-        export(out, "lume_set_state", 0x00, 5);
-        export(out, "lume_get_state", 0x00, 6);
+        export(out, "lume_route_match", 0x00, 2);
+        export(out, "lume_get_patch_len", 0x00, 3);
+        export(out, "lume_alloc", 0x00, 4);
+        export(out, "lume_free", 0x00, 5);
+        export(out, "lume_set_state", 0x00, 6);
+        export(out, "lume_get_state", 0x00, 7);
     });
     section(&mut wasm, 10, |out| {
-        leb(out, 7);
+        leb(out, 8);
         func_body(out, &[], |body| {
             body.push(0x41);
             leb(body, 0);
@@ -197,6 +208,15 @@ fn encode_runtime_wasm_from_parts(
                 leb(body, PATCH_PTR);
                 body.push(0x0f);
                 body.push(0x0b);
+            }
+            body.push(0x41);
+            leb(body, 0);
+        });
+        func_body(out, &[], |body| {
+            for (index, route_path) in static_routes.iter().enumerate() {
+                if let Some(path) = route_path {
+                    emit_static_route_match(body, index, path);
+                }
             }
             body.push(0x41);
             leb(body, 0);
@@ -263,6 +283,13 @@ fn encode_runtime_wasm_from_parts(
         });
     });
     wasm
+}
+
+fn route_has_only_static_segments(route: &lume_ir::IrRoute) -> bool {
+    route
+        .segments
+        .iter()
+        .all(|segment| matches!(segment, lume_ir::RouteSegment::Static(_)))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,6 +400,34 @@ fn emit_patch_address(out: &mut Vec<u8>) {
     out.push(0x23);
     leb(out, 1);
     out.push(0x6a);
+}
+
+fn emit_static_route_match(out: &mut Vec<u8>, route_index: usize, path: &[u8]) {
+    out.push(0x20);
+    leb(out, 1);
+    out.push(0x41);
+    leb(out, path.len() as u32);
+    out.push(0x46);
+    for (offset, byte) in path.iter().copied().enumerate() {
+        out.push(0x20);
+        leb(out, 0);
+        out.push(0x41);
+        leb(out, offset as u32);
+        out.push(0x6a);
+        out.push(0x2d);
+        leb(out, 0);
+        leb(out, 0);
+        out.push(0x41);
+        leb(out, u32::from(byte));
+        out.push(0x46);
+        out.push(0x71);
+    }
+    out.push(0x04);
+    out.push(0x40);
+    out.push(0x41);
+    leb(out, route_index as u32 + 1);
+    out.push(0x0f);
+    out.push(0x0b);
 }
 
 fn state_global(index: usize) -> u32 {
@@ -499,6 +554,7 @@ impl<'ctx, 'module> WasmCodegen<'ctx, 'module> {
         self.emit_state_globals(program);
         self.emit_init()?;
         self.emit_dispatch()?;
+        self.emit_route_match()?;
         self.emit_get_patch_len()?;
         self.emit_alloc()?;
         self.emit_free()?;
@@ -558,6 +614,19 @@ impl<'ctx, 'module> WasmCodegen<'ctx, 'module> {
         self.builder
             .build_return(Some(&self.i32_type.const_zero()))
             .map_err(|err| format!("failed to return from lume_dispatch: {err}"))?;
+        verify(function)
+    }
+
+    fn emit_route_match(&self) -> Result<FunctionValue<'ctx>, String> {
+        let fn_type = self
+            .i32_type
+            .fn_type(&[self.i32_type.into(), self.i32_type.into()], false);
+        let function = exported_function(self.module, "lume_route_match", fn_type);
+        let block = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(block);
+        self.builder
+            .build_return(Some(&self.i32_type.const_zero()))
+            .map_err(|err| format!("failed to return from lume_route_match: {err}"))?;
         verify(function)
     }
 
@@ -692,6 +761,9 @@ mod tests {
             .windows(b"lume_dispatch".len())
             .any(|item| item == b"lume_dispatch"));
         assert!(bytes
+            .windows(b"lume_route_match".len())
+            .any(|item| item == b"lume_route_match"));
+        assert!(bytes
             .windows(b"lume_get_patch_len".len())
             .any(|item| item == b"lume_get_patch_len"));
         assert!(bytes
@@ -732,6 +804,9 @@ component App {
             .contains("target triple = \"wasm32-unknown-unknown\""));
         assert!(artifact.llvm_ir.contains("define void @lume_init(i32"));
         assert!(artifact.llvm_ir.contains("define i32 @lume_dispatch(i32"));
+        assert!(artifact
+            .llvm_ir
+            .contains("define i32 @lume_route_match(i32"));
         assert!(artifact
             .llvm_ir
             .contains("define i32 @lume_get_patch_len(i32"));

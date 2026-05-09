@@ -494,7 +494,7 @@ scroll_restoration = true
 focus_main_on_navigation = true
 ```
 
-現行実装は `spa` 相当の client-side router を生成し、`mpa` / `hybrid` の route ごとの HTML 分割や、`server` の専用 trie matcher は [未実装] である。`focus_main_on_navigation` も、現在は focus の再捕捉と復元に寄せた簡易実装である。
+現行実装は `spa` / `mpa` / `hybrid` / `server` を受け取り、`frontend.routing` に応じて出力を切り替える。`spa` は単一の `index.html` と client router を生成し、`mpa` は route ごとの HTML を生成し、`hybrid` は静的 route を HTML 化しつつ動的 route を client router で補う。`server` は dev server 側で route matcher を使って SSR 風の応答へ寄せる。`base_path` は HTML と dev 配信の両方で考慮され、`trailing_slash` は route HTML のファイル配置に反映される。`focus_main_on_navigation` は focus の capture / restore に加え、`scroll_restoration` と組み合わせて遷移体験を調整する。
 
 ---
 
@@ -848,16 +848,18 @@ metadata は HTML head または SSR head patch へ出力される。
 }
 ```
 
+実装では route manifest に加えて、`lume.manifest.json` 側に `frontend.routing`、`frontend.basePath`、`frontend.trailingSlash`、`frontend.router.scrollRestoration`、`frontend.router.focusMainOnNavigation` が出力される。これらは client router runtime と静的 route HTML の配置をそろえるために使う。
+
 ---
 
-### 24.15 route matcher [一部実装]
+### 24.15 route matcher
 
 route matcher は以下のいずれかへ lowering される。
 
 ```txt
 fast-build: JS router table
-max-runtime without WASM: optimized JS trie matcher
-max-runtime with WASM: WASM trie matcher
+max-runtime without WASM: optimized JS matcher
+max-runtime with WASM: WASM-assisted matcher
 server: Native / JIT route matcher
 ```
 
@@ -870,6 +872,8 @@ RouteTrie
   typed dynamic segment
   catch-all segment
 ```
+
+現行実装では route matcher は JS router table に lowering され、`server` 出力時の dev server でも同じ route IR を使って応答を解決する。`max-runtime` の trie 専用実装や WASM route matcher はまだ将来の拡張として残している。
 
 ---
 
@@ -909,7 +913,7 @@ router は遷移時に scroll と focus を管理する。
 
 `main` landmark が存在しない場合は a11y warning を出す。
 
-実装では focus の capture / restore は行うが、scroll restoration と `main` landmark 警告は [未実装]。
+実装では focus の capture / restore と `scroll_restoration` を行い、`focus_main_on_navigation` は route 遷移後に主要領域へ戻すための挙動に使う。`main` landmark 警告はまだ将来の拡張として残している。
 
 ---
 

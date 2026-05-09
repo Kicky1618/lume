@@ -1,0 +1,9 @@
+[package]
+name = "framework_bench"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "framework-bench"
+path = "src/main.rs"

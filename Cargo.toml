@@ -24,6 +24,7 @@ members = [
   "crates/lume_runtime_server",
   "crates/lume_ffi",
   "crates/lume_lsp",
+  "tools/framework_bench",
 ]
 resolver = "2"
 

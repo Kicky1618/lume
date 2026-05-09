@@ -92,6 +92,7 @@ pub struct BuildOptions {
     pub out_dir: PathBuf,
     pub target: BuildTarget,
     pub activation: FrontendActivation,
+    pub frontend: FrontendOptions,
 }
 
 impl Default for BuildOptions {
@@ -102,6 +103,128 @@ impl Default for BuildOptions {
             out_dir: PathBuf::from("dist"),
             target: BuildTarget::default(),
             activation: FrontendActivation::default(),
+            frontend: FrontendOptions::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FrontendOptions {
+    pub routing: FrontendRouting,
+    pub base_path: String,
+    pub trailing_slash: TrailingSlash,
+    pub router: RouterOptions,
+}
+
+impl Default for FrontendOptions {
+    fn default() -> Self {
+        Self {
+            routing: FrontendRouting::default(),
+            base_path: "/".into(),
+            trailing_slash: TrailingSlash::default(),
+            router: RouterOptions::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrontendRouting {
+    Spa,
+    Mpa,
+    Hybrid,
+    Server,
+}
+
+impl FrontendRouting {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Spa => "spa",
+            Self::Mpa => "mpa",
+            Self::Hybrid => "hybrid",
+            Self::Server => "server",
+        }
+    }
+
+    pub fn emits_route_html(self) -> bool {
+        matches!(self, Self::Mpa | Self::Hybrid)
+    }
+
+    pub fn uses_spa_fallback(self) -> bool {
+        matches!(self, Self::Spa | Self::Hybrid)
+    }
+}
+
+impl Default for FrontendRouting {
+    fn default() -> Self {
+        Self::Spa
+    }
+}
+
+impl FromStr for FrontendRouting {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "spa" => Ok(Self::Spa),
+            "mpa" => Ok(Self::Mpa),
+            "hybrid" => Ok(Self::Hybrid),
+            "server" => Ok(Self::Server),
+            other => Err(format!(
+                "unknown frontend.routing `{other}`; expected `spa`, `mpa`, `hybrid`, or `server`"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrailingSlash {
+    Never,
+    Always,
+    Preserve,
+}
+
+impl TrailingSlash {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::Always => "always",
+            Self::Preserve => "preserve",
+        }
+    }
+}
+
+impl Default for TrailingSlash {
+    fn default() -> Self {
+        Self::Never
+    }
+}
+
+impl FromStr for TrailingSlash {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "never" => Ok(Self::Never),
+            "always" => Ok(Self::Always),
+            "preserve" | "auto" => Ok(Self::Preserve),
+            other => Err(format!(
+                "unknown frontend.trailing_slash `{other}`; expected `never`, `always`, or `preserve`"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouterOptions {
+    pub scroll_restoration: bool,
+    pub focus_main_on_navigation: bool,
+}
+
+impl Default for RouterOptions {
+    fn default() -> Self {
+        Self {
+            scroll_restoration: true,
+            focus_main_on_navigation: true,
         }
     }
 }
@@ -168,6 +291,23 @@ impl BuildOptions {
                     options.activation = value.parse().map_err(invalid_data)?;
                     explicit_activation = true;
                 }
+                ("frontend", "routing") => {
+                    options.frontend.routing = value.parse().map_err(invalid_data)?;
+                }
+                ("frontend", "base_path") => {
+                    options.frontend.base_path = normalize_base_path(value)
+                }
+                ("frontend", "trailing_slash") => {
+                    options.frontend.trailing_slash = value.parse().map_err(invalid_data)?;
+                }
+                ("frontend.router", "scroll_restoration") => {
+                    options.frontend.router.scroll_restoration =
+                        parse_bool(value, "frontend.router.scroll_restoration")?;
+                }
+                ("frontend.router", "focus_main_on_navigation") => {
+                    options.frontend.router.focus_main_on_navigation =
+                        parse_bool(value, "frontend.router.focus_main_on_navigation")?;
+                }
                 ("frontend", "hydration") if !explicit_activation => {
                     options.activation = match value {
                         "partial" => FrontendActivation::PartialHydrate,
@@ -201,6 +341,30 @@ fn invalid_data(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
+fn parse_bool(value: &str, key: &str) -> io::Result<bool> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        other => Err(invalid_data(format!(
+            "invalid {key} value `{other}`; expected true or false"
+        ))),
+    }
+}
+
+fn normalize_base_path(value: &str) -> String {
+    let mut base = value.trim().to_string();
+    if base.is_empty() || base == "/" {
+        return "/".into();
+    }
+    if !base.starts_with('/') {
+        base.insert(0, '/');
+    }
+    while base.len() > 1 && base.ends_with('/') {
+        base.pop();
+    }
+    base
+}
+
 fn config_relative_path(base_dir: &Path, value: &str) -> PathBuf {
     let path = PathBuf::from(value);
     if path.is_absolute() {
@@ -226,7 +390,7 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildOptions, BuildTarget, FrontendActivation};
+    use super::{BuildOptions, BuildTarget, FrontendActivation, FrontendRouting, TrailingSlash};
     use std::fs;
 
     #[test]
@@ -296,5 +460,25 @@ mod tests {
         fs::remove_file(path).ok();
 
         assert_eq!(options.activation, FrontendActivation::PartialHydrate);
+    }
+
+    #[test]
+    fn parses_frontend_router_output_options() {
+        let path =
+            std::env::temp_dir().join(format!("lume-session-routing-{}.toml", std::process::id()));
+        fs::write(
+            &path,
+            "[frontend]\nrouting = \"hybrid\"\nbase_path = \"docs/\"\ntrailing_slash = \"always\"\n\n[frontend.router]\nscroll_restoration = false\nfocus_main_on_navigation = true\n",
+        )
+        .expect("write config");
+
+        let options = BuildOptions::from_toml_file(&path).expect("parse config");
+        fs::remove_file(path).ok();
+
+        assert_eq!(options.frontend.routing, FrontendRouting::Hybrid);
+        assert_eq!(options.frontend.base_path, "/docs");
+        assert_eq!(options.frontend.trailing_slash, TrailingSlash::Always);
+        assert!(!options.frontend.router.scroll_restoration);
+        assert!(options.frontend.router.focus_main_on_navigation);
     }
 }

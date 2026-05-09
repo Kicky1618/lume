@@ -1,6 +1,6 @@
 use lume_ast::*;
 use lume_codegen_css::{is_style_attr, layout_class, style_class_for, style_ref_class};
-use lume_ir::LumeProgram;
+use lume_ir::{IrRoute, LumeProgram};
 use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
@@ -33,6 +33,22 @@ pub fn generate(program: &LumeProgram) -> HtmlOutput {
 }
 
 pub fn generate_with_resume(program: &LumeProgram, resume: bool) -> HtmlOutput {
+    generate_with_initial_route(program, resume, None)
+}
+
+pub fn generate_route_with_resume(
+    program: &LumeProgram,
+    route: &IrRoute,
+    resume: bool,
+) -> HtmlOutput {
+    generate_with_initial_route(program, resume, Some(route))
+}
+
+fn generate_with_initial_route(
+    program: &LumeProgram,
+    resume: bool,
+    initial_route: Option<&IrRoute>,
+) -> HtmlOutput {
     let serialized_state_json = serialized_state(program);
     let mut ctx = Ctx {
         next_node: 1,
@@ -44,6 +60,7 @@ pub fn generate_with_resume(program: &LumeProgram, resume: bool) -> HtmlOutput {
         state: initial_state(program),
         component_stack: Vec::new(),
         resume,
+        initial_route: initial_route.cloned(),
     };
     let body = program
         .view()
@@ -75,6 +92,7 @@ struct Ctx {
     state: HashMap<String, Value>,
     component_stack: Vec<String>,
     resume: bool,
+    initial_route: Option<IrRoute>,
 }
 
 fn render_view(view: &ViewBlock, ctx: &mut Ctx, program: &LumeProgram) -> String {
@@ -176,7 +194,7 @@ fn render_element(element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -
         "GpuCanvas" => render_gpu_canvas(element, ctx),
         "Link" | "NavLink" | "Anchor" => render_link(element, ctx, program),
         "Form" => render_form(element, ctx, program),
-        "Outlet" => render_outlet(element, ctx),
+        "Outlet" => render_outlet(element, ctx, program),
         "Router" => render_semantic_container(element, ctx, program, "div", "l-router", None),
         "Route" => render_semantic_container(element, ctx, program, "div", "l-route", None),
         "Modal" => render_dialog_like(element, ctx, program, true),
@@ -714,11 +732,19 @@ fn action_accepts_file_upload(program: &LumeProgram, name: &str) -> bool {
         })
 }
 
-fn render_outlet(_element: &ElementNode, ctx: &mut Ctx) -> String {
+fn render_outlet(_element: &ElementNode, ctx: &mut Ctx, program: &LumeProgram) -> String {
     let id = node_id(ctx);
+    let route_view = ctx
+        .initial_route
+        .as_ref()
+        .and_then(|route| route.view.clone());
+    let route_html = route_view
+        .as_ref()
+        .map(|view| render_view(view, ctx, program))
+        .unwrap_or_default();
     format!(
-        "<div data-lume-id=\"{}\" data-lume-outlet=\"true\"></div>\n",
-        id
+        "<div data-lume-id=\"{}\" data-lume-outlet=\"true\">{}</div>\n",
+        id, route_html
     )
 }
 
