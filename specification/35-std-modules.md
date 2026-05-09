@@ -24,7 +24,28 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 
 標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
 
-実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`ImageCanvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`bytes`、`query`、`storage`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
+実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`ImageCanvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`bytes`、`query`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
+
+### 35.0 `lume/std` の実装準拠 API 設計
+
+実際に import 解決される API は、`crates/lume_resolver/src/lib.rs` の `standard_exports` が一次情報である。ここで定義されたモジュール・export 名だけが `import { ... } from "lume/std/..."` として受理される。
+
+| module | export |
+| --- | --- |
+| `lume/std/ui` | `Text`, `Button`, `Input`, `TextArea`, `Image`, `Script`, `Form`, `Anchor`, `Canvas`, `ImageCanvas`, `NativeCanvas`, `Modal`, `Dialog`, `Tabs`, `Table`, `Spacer` |
+| `lume/std/layout` | `Box`, `Row`, `Column`, `Grid`, `Stack`, `Container`, `Spacer` |
+| `lume/std/router` | `Router`, `Route`, `Link`, `NavLink`, `Outlet`, `navigate`, `redirect`, `notFound`, `prefetchRoute` |
+| `lume/std/form` | `Form`, `Field`, `FormData`, `validate` |
+| `lume/std/action` | `ActionResult`, `ActionError`, `ActionController`, `ActionStatus`, `callAction`, `useAction` |
+| `lume/std/query` | `query`, `invalidate` |
+| `lume/std/bytes` | `bytes` |
+| `lume/std/ffi` | `Owned`, `Borrowed`, `View`, `Handle`, `Ptr`, `StatusCode`, `CanvasSurface` |
+| `lume/std/image` | `ImageCanvas`, `RgbaImage` |
+| `lume/std/gpu` | `GpuCanvas`, `gpu` |
+| `lume/std/a11y` | `VisuallyHidden`, `FocusTrap`, `Landmark` |
+| `lume/std/i18n` | `t`, `locale` |
+
+`lume/std/storage` や `lume/std/asset` はこの resolver の受理対象にはまだ入っていないため、`lume/std/...` import としては現時点で使えない。未知モジュールは `LUME6101`、未 export 項目は `LUME6102` で診断される。
 
 ### 35.1 `lume/std/ui`
 
