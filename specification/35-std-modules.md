@@ -24,7 +24,7 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 
 標準モジュールは Lume コンパイラに同梱され、Rust 側で解決される。JavaScript package として配布しない。
 
-実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`ImageCanvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`bytes`、`query`、`invalidate`、`t`、`locale` などが主要な内蔵要素として扱われる。
+実装では `Text`、`Button`、`Input`、`TextArea`、`Image`、`Script`、`Form`、`Anchor`、`Canvas`、`ImageCanvas`、`NativeCanvas`、`Modal`、`Dialog`、`Tabs`、`Table`、`Box`、`Row`、`Column`、`Grid`、`Stack`、`Container`、`Spacer`、`Router`、`Route`、`Link`、`NavLink`、`Outlet`、`GpuCanvas`、`Field`、`VisuallyHidden`、`FocusTrap`、`Landmark`、`bytes`、`query`、`invalidate`、`t`、`locale` などが、`lume/std/...` の module export として扱われる。
 
 ### 35.0 `lume/std` の実装準拠 API 設計
 
@@ -44,6 +44,8 @@ Lume 標準機能は `lume/std/...` 名前空間で提供する。
 | `lume/std/gpu` | `GpuCanvas`, `gpu` |
 | `lume/std/a11y` | `VisuallyHidden`, `FocusTrap`, `Landmark` |
 | `lume/std/i18n` | `t`, `locale` |
+
+`Spacer` は `lume/std/ui` と `lume/std/layout` の両方から export される（どちらの import でも resolver 上は正当）。
 
 `lume/std/storage` や `lume/std/asset` はこの resolver の受理対象にはまだ入っていないため、`lume/std/...` import としては現時点で使えない。未知モジュールは `LUME6101`、未 export 項目は `LUME6102` で診断される。
 
