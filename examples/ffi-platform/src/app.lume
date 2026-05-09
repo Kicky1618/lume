@@ -44,7 +44,7 @@ component App {
       Input(value=sample, label="Input") {
         on input(value) {
           sample = value
-          refreshDigest()
+          refreshDigest();
         }
       }
 

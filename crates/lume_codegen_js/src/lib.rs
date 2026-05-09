@@ -146,7 +146,7 @@ pub fn generate_with_options(
         js.push_str("}\n\n");
     }
     if !program.server_actions.is_empty() || program.queries.iter().any(|query| query.is_mutation) {
-        js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"dev-csrf-token\";\n\n");
+        js.push_str("const lumeCsrfToken = document.querySelector('meta[name=\"lume-csrf\"]')?.content || \"\";\n\n");
         js.push_str("const serverActionParams = {\n");
         for action in &program.server_actions {
             let params = action
@@ -642,7 +642,7 @@ pub fn generate_with_options(
     js.push_str("    const url = new URL(`/__lume/native/${encodeURIComponent(moduleName)}/${encodeURIComponent(symbolName)}`, window.location.href);\n");
     js.push_str("    for (const name of argNames) {\n");
     js.push_str("      const value = canvas.getAttribute(`data-${nativeCanvasDataAttr(name)}`);\n");
-    js.push_str("      if (value !== undefined) url.searchParams.append('args', value);\n");
+    js.push_str("      if (value !== null) url.searchParams.append('args', value);\n");
     js.push_str("    }\n");
     js.push_str("    try {\n");
     js.push_str("      const response = await fetch(url);\n");
@@ -2366,6 +2366,7 @@ component App {
         assert!(js.contains("data-lume-native-image-symbol=\"mandelbrot_render\""));
         assert!(js.contains("data-lume-native-image-args=\"width,height,scale\""));
         assert!(js.contains("data-scale=\"${escapeAttr(state.scale ?? \"\")}\""));
+        assert!(js.contains("if (value !== null) url.searchParams.append('args', value);"));
         assert!(js.contains("zoomIn();"));
     }
 

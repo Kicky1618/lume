@@ -13,6 +13,7 @@ pub struct ServerRuntime {
 #[derive(Clone, Debug)]
 pub struct ActionRequestContext {
     pub csrf_token: Option<String>,
+    pub expected_csrf_token: Option<String>,
     pub authenticated: bool,
     pub roles: Vec<String>,
     pub permissions: Vec<String>,
@@ -22,7 +23,8 @@ pub struct ActionRequestContext {
 impl Default for ActionRequestContext {
     fn default() -> Self {
         Self {
-            csrf_token: Some("dev-csrf-token".into()),
+            csrf_token: Some("test-csrf-token".into()),
+            expected_csrf_token: Some("test-csrf-token".into()),
             authenticated: false,
             roles: Vec::new(),
             permissions: Vec::new(),
@@ -380,7 +382,7 @@ fn enforce_action_guards(
     if modifier_value(action, "csrf")
         .map(|value| value != "false")
         .unwrap_or(true)
-        && context.csrf_token.as_deref() != Some("dev-csrf-token")
+        && (context.csrf_token.is_none() || context.csrf_token != context.expected_csrf_token)
     {
         return Err(ActionError {
             status: 403,
@@ -1712,6 +1714,59 @@ component App {
             .call("publicEcho", vec![ActionValue::String("hello".into())])
             .expect("optional auth result");
         assert_eq!(result.value, ActionValue::String("hello".into()));
+    }
+
+    #[test]
+    fn enforces_csrf_token_presence_and_match() {
+        let runtime = runtime_for(
+            r#"
+server action save(message: String): String csrf true {
+  return message
+}
+
+component App {
+  view {
+    Text("ok")
+  }
+}
+"#,
+        );
+        let missing = ActionRequestContext {
+            csrf_token: None,
+            expected_csrf_token: Some("expected".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .call_with_context("save", vec![ActionValue::String("draft".into())], &missing)
+                .expect_err("missing csrf")
+                .status,
+            403
+        );
+        let mismatch = ActionRequestContext {
+            csrf_token: Some("wrong".into()),
+            expected_csrf_token: Some("expected".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .call_with_context("save", vec![ActionValue::String("draft".into())], &mismatch)
+                .expect_err("csrf mismatch")
+                .status,
+            403
+        );
+        let matched = ActionRequestContext {
+            csrf_token: Some("expected".into()),
+            expected_csrf_token: Some("expected".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            runtime
+                .call_with_context("save", vec![ActionValue::String("draft".into())], &matched)
+                .expect("csrf ok")
+                .value,
+            ActionValue::String("draft".into())
+        );
     }
 
     #[test]

@@ -49,6 +49,8 @@ struct NativeBytes {
     len: usize,
 }
 
+const MAX_NATIVE_BYTES_LEN: usize = 64 * 1024 * 1024;
+
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum NativeScalarValue {
@@ -403,23 +405,25 @@ fn handle_connection(mut stream: TcpStream, options: &BuildOptions) -> io::Resul
     };
 
     if let Ok(body) = fs::read(&path) {
+        let body = response_body_with_dev_csrf(&path, body);
         return write_response(
             &mut stream,
             "200 OK",
             mime_type(&path),
             method != "HEAD",
-            &body,
+            body.as_slice(),
         );
     }
 
     if let Some(fallback) = spa_fallback_path(&options.out_dir, target) {
         if let Ok(body) = fs::read(&fallback) {
+            let body = response_body_with_dev_csrf(&fallback, body);
             return write_response(
                 &mut stream,
                 "200 OK",
                 mime_type(&fallback),
                 method != "HEAD",
-                &body,
+                body.as_slice(),
             );
         }
     }
@@ -559,13 +563,11 @@ fn handle_action_request(
 ) -> io::Result<()> {
     let runtime = server_runtime(options)?;
     let context = lume_runtime_server::ActionRequestContext {
-        csrf_token: request_header(headers, "x-lume-csrf")
-            .or_else(|| Some("dev-csrf-token".into())),
-        authenticated: request_header(headers, "authorization").is_some()
-            || request_header(headers, "cookie")
-                .is_some_and(|cookie| cookie.contains("lume_session=")),
-        roles: comma_header_values(headers, "x-lume-role"),
-        permissions: comma_header_values(headers, "x-lume-can"),
+        csrf_token: request_header(headers, "x-lume-csrf"),
+        expected_csrf_token: Some(dev_csrf_token()),
+        authenticated: false,
+        roles: Vec::new(),
+        permissions: Vec::new(),
         rate_limit_exceeded: action_rate_limited(action_id, headers),
     };
     let body = std::str::from_utf8(body).map_err(|err| {
@@ -925,13 +927,14 @@ fn copy_native_bytes(
     out: NativeBytes,
 ) -> Result<Vec<u8>, String> {
     if out.ptr.is_null() {
+        if out.len != 0 {
+            return Err(format!(
+                "native symbol `{}` in module `{}` returned a null pointer with non-zero length {}",
+                symbol.native_name, module.name, out.len
+            ));
+        }
         return Ok(Vec::new());
     }
-    let bytes = if out.len == 0 {
-        Vec::new()
-    } else {
-        unsafe { std::slice::from_raw_parts(out.ptr, out.len) }.to_vec()
-    };
     let Some(free_name) = symbol.requires_free.as_deref() else {
         return Err(format!(
             "native symbol `{}` in module `{}` returned owned bytes without a free function",
@@ -948,6 +951,20 @@ fn copy_native_bytes(
         ));
     };
     let free: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(free_symbol.address) };
+    if out.len > MAX_NATIVE_BYTES_LEN {
+        unsafe {
+            free(out.ptr);
+        }
+        return Err(format!(
+            "native symbol `{}` in module `{}` returned {} bytes, exceeding the {} byte limit",
+            symbol.native_name, module.name, out.len, MAX_NATIVE_BYTES_LEN
+        ));
+    }
+    let bytes = if out.len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(out.ptr, out.len) }.to_vec()
+    };
     unsafe {
         free(out.ptr);
     }
@@ -1013,19 +1030,6 @@ fn request_header(headers: &[(String, String)], name: &str) -> Option<String> {
         .find_map(|(header, value)| header.eq_ignore_ascii_case(name).then(|| value.clone()))
 }
 
-fn comma_header_values(headers: &[(String, String)], name: &str) -> Vec<String> {
-    request_header(headers, name)
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn action_rate_limited(action_id: &str, headers: &[(String, String)]) -> bool {
     let identity = request_header(headers, "authorization")
         .or_else(|| request_header(headers, "x-forwarded-for"))
@@ -1049,6 +1053,54 @@ fn action_rate_limited(action_id: &str, headers: &[(String, String)]) -> bool {
 }
 
 static RATE_LIMITS: OnceLock<Mutex<HashMap<String, (u64, u32)>>> = OnceLock::new();
+
+fn dev_csrf_token() -> String {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN.get_or_init(generate_dev_csrf_token).clone()
+}
+
+fn generate_dev_csrf_token() -> String {
+    let mut bytes = [0_u8; 32];
+    if fill_random_bytes(&mut bytes).is_err() {
+        let fallback = format!(
+            "{:?}:{:?}:{:?}",
+            SystemTime::now(),
+            std::process::id(),
+            thread::current().id()
+        );
+        for (index, byte) in fallback.as_bytes().iter().enumerate() {
+            bytes[index % 32] ^= *byte;
+        }
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn fill_random_bytes(bytes: &mut [u8]) -> io::Result<()> {
+    fs::File::open("/dev/urandom")?.read_exact(bytes)
+}
+
+fn response_body_with_dev_csrf(path: &Path, body: Vec<u8>) -> Vec<u8> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("html") {
+        return body;
+    }
+    let mut html = match String::from_utf8(body) {
+        Ok(html) => html,
+        Err(err) => return err.into_bytes(),
+    };
+    if html.contains("name=\"lume-csrf\"") {
+        return html.into_bytes();
+    }
+    let meta = format!(
+        "    <meta name=\"lume-csrf\" content=\"{}\">\n",
+        dev_csrf_token()
+    );
+    if let Some(index) = html.find("    <title>") {
+        html.insert_str(index, &meta);
+        return html.into_bytes();
+    }
+    html.replace("<head>", &format!("<head>\n{meta}"))
+        .into_bytes()
+}
 
 fn resolve_request_path(out_dir: &Path, target: &str) -> Option<PathBuf> {
     let path = target
@@ -1155,7 +1207,10 @@ fn mime_type(path: &Path) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{mime_type, parse_byte_size, resolve_request_path, spa_fallback_path};
+    use super::{
+        mime_type, parse_byte_size, resolve_request_path, response_body_with_dev_csrf,
+        spa_fallback_path,
+    };
     use std::path::Path;
 
     #[test]
@@ -1194,6 +1249,20 @@ mod tests {
             mime_type(Path::new("dist/assets/app.wasm")),
             "application/wasm"
         );
+    }
+
+    #[test]
+    fn injects_dev_csrf_meta_into_html_responses() {
+        let body =
+            b"<!doctype html>\n<html>\n  <head>\n    <title>Lume App</title>\n  </head>\n</html>\n"
+                .to_vec();
+        let html = String::from_utf8(response_body_with_dev_csrf(
+            Path::new("dist/index.html"),
+            body,
+        ))
+        .expect("html");
+        assert!(html.contains("<meta name=\"lume-csrf\" content=\""));
+        assert!(html.contains("    <title>Lume App</title>"));
     }
 
     #[test]
